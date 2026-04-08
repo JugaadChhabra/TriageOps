@@ -16,17 +16,11 @@ from openai import OpenAI
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
-HF_TOKEN = os.getenv("HF_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
 
 # Optional — if you use from_docker_image():
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
-
-if HF_TOKEN is None:
-    raise ValueError(
-        "HF_TOKEN environment variable is required. "
-        "Set it to your Hugging Face or OpenAI API key."
-    )
 
 client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
@@ -134,7 +128,7 @@ def log_end(
     success_str = "true" if success else "false"
     clamped_score = min(max(score, 0.0), 1.0)
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={success_str} steps={steps} score={clamped_score:.2f} rewards={rewards_str}", flush=True)
+    print(f"[END] success={success_str} steps={steps} score={clamped_score:.3f} rewards={rewards_str}", flush=True)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
