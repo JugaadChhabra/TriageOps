@@ -1,6 +1,6 @@
 {
   "name": "full_resolution",
-  "description": "Hard — 20 initial tickets + Poisson arrivals (rate 3.0) + 2 burst events = 30+ total. Must classify, prioritize, respond with quality, detect duplicates, and handle escalations under extreme time pressure. Composite grader across all dimensions.",
+  "description": "Hard — 20 initial tickets + Poisson arrivals (rate 3.0) + 2 burst events = 30+ total. VIP tickets (15%) carry 3x weight. Engineering dept goes down at step 4. Must classify, prioritize, respond, detect duplicates, and handle escalations under extreme time pressure.",
   "initial_tickets": 20,
   "max_steps": 10,
   "capacity_per_step": 5,
@@ -13,6 +13,9 @@
     {"step": 5, "count": 12, "duplicate_ratio": 0.6}
   ],
   "enable_duplicates": true,
+  "vip_ratio": 0.15,
+  "department_outage": {"engineering": 4},
+  "department_capacity": 6,
   "grader_weights": {
     "resolution_rate": 0.15,
     "prioritization": 0.15,

@@ -64,6 +64,7 @@ class Customer(BaseModel):
     ltv: float = Field(description="Lifetime value in USD")
     churn_risk: float = Field(ge=0.0, le=1.0, description="Probability of churning")
     satisfaction: float = Field(ge=0.0, le=1.0, description="Current satisfaction score")
+    prior_interactions: int = Field(default=0, description="Number of prior support interactions")
 
 
 class Ticket(BaseModel):
@@ -82,6 +83,8 @@ class Ticket(BaseModel):
     sentiment: float = Field(default=0.5, ge=0.0, le=1.0, description="Customer sentiment")
     duplicate_of: Optional[str] = Field(default=None, description="ID of ticket this is a duplicate of")
     subcategory: str = Field(default="", description="More specific categorization")
+    is_vip: bool = Field(default=False, description="VIP ticket — carries 3x reward weight")
+    is_abusive: bool = Field(default=False, description="Contains abusive language — requires de-escalation")
 
 
 class TicketView(BaseModel):
@@ -95,6 +98,8 @@ class TicketView(BaseModel):
     sla_remaining: int
     created_step: int
     sentiment: float
+    is_vip: bool = False
+    prior_interactions: int = 0
 
     @classmethod
     def from_ticket(cls, ticket: Ticket) -> "TicketView":
@@ -108,6 +113,8 @@ class TicketView(BaseModel):
             sla_remaining=ticket.sla_remaining,
             created_step=ticket.created_step,
             sentiment=ticket.sentiment,
+            is_vip=ticket.is_vip,
+            prior_interactions=ticket.customer.prior_interactions,
         )
 
 
@@ -180,6 +187,13 @@ class TaskConfig(BaseModel):
     seed: int = Field(default=42, description="Random seed for reproducibility")
     bursts: list[BurstConfig] = Field(default_factory=list, description="Scheduled burst events")
     enable_duplicates: bool = Field(default=False, description="Whether duplicate tickets can appear")
+    vip_ratio: float = Field(default=0.0, description="Fraction of tickets that are VIP (3x weight)")
+    department_outage: Optional[dict[str, int]] = Field(
+        default=None,
+        description="Department outage event: {department_name: step_when_it_goes_down}. "
+                    "Dept becomes unavailable for escalation at that step.",
+    )
+    department_capacity: int = Field(default=10, description="Max tickets per department before overload")
     grader_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "resolution_rate": 0.25,

@@ -17,6 +17,16 @@ Customer support triage is a **multi-objective constrained decision problem**. Y
 
 This creates a realistic benchmark for evaluating AI agents on **planning under uncertainty**, **prioritization**, and **human-centric decision-making**.
 
+### Domain Novelty
+
+Existing OpenEnv environments focus on code generation, data processing, and structured tasks. **Customer support ops is underrepresented** despite being one of the highest-volume AI deployment domains. This environment fills that gap with:
+
+- **Natural language understanding required** — the agent must infer ticket category and urgency from free-text descriptions, not metadata labels
+- **Multi-objective Pareto frontier** — no strategy can maximize all 7 grading dimensions simultaneously. Speed trades off with quality. Coverage trades off with prioritization. Escalation trades off with department capacity.
+- **Dynamic surprise mechanics** — VIP tickets (3x weight) appear unpredictably. Departments go offline mid-episode. Ticket bursts simulate real outage floods. Customer sentiment decays and triggers forced escalation at zero.
+- **Abusive/adversarial inputs** — templates include angry repeat callers, multi-issue tickets, and hostile language requiring de-escalation
+- **Realistic operational constraints** — limited actions per time step, department capacity limits, SLA clocks, and enterprise vs free-tier prioritization mirrors actual support queue dynamics
+
 ---
 
 ## Environment Overview
@@ -32,6 +42,44 @@ reset(task) → initial observation
        time advances: SLAs tick, new tickets arrive, sentiment decays
   └─ episode ends: time limit, all resolved, or catastrophic breach
 grade() → final score 0.0–1.0
+```
+
+### Architecture
+
+```
+                    ┌──────────────────────────────────┐
+                    │          Agent (LLM)             │
+                    │  reads observation → picks action │
+                    └──────────┬───────────────────────┘
+                               │ SupportAction (JSON)
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    FastAPI Server (:7860)                    │
+│  POST /reset ─── POST /step ─── GET /state ─── GET /grade  │
+└──────────┬──────────────────────────────────────────────────┘
+           │
+           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  CustomerSupportEnv                          │
+│                                                             │
+│  ┌─────────┐   ┌──────────────┐   ┌──────────────────────┐ │
+│  │ Ticket  │   │   Rewards    │   │   World Clock        │ │
+│  │  Queue  │──▶│  per-action  │   │  SLA ticks           │ │
+│  │         │   │  per-step    │   │  sentiment decays    │ │
+│  │ 50+ tpl │   │  end-bonus   │   │  arrivals (Poisson)  │ │
+│  └─────────┘   └──────────────┘   │  bursts (outage)     │ │
+│                                    │  dept outages        │ │
+│  ┌─────────┐   ┌──────────────┐   └──────────────────────┘ │
+│  │Customer │   │  7 Graders   │                             │
+│  │Profiles │   │  resolution  │   ┌──────────────────────┐ │
+│  │tier/ltv │   │  priority    │   │  3 Tasks             │ │
+│  │churn    │   │  SLA         │   │  easy → med → hard   │ │
+│  │VIP flag │   │  quality     │   │  10 → 20 → 30+ tix  │ │
+│  └─────────┘   │  duplicates  │   └──────────────────────┘ │
+│                │  classific.  │                             │
+│                │  critical    │                             │
+│                └──────────────┘                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Observation Space

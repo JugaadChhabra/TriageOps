@@ -74,7 +74,22 @@ When using "respond", write a response that:
 ## Duplicate Detection
 Tickets are duplicates if they describe the same underlying issue (e.g., same outage, same bug).
 Look for: similar subjects, same error messages, same service mentioned, overlapping timeframes.
-Merge the newer ticket into the older one."""
+Merge the newer ticket into the older one.
+
+## One-Shot Example
+
+Given a ticket:
+[TKT-0042] SLA:2 | Tier:enterprise | Sentiment:0.2 | Status:open | VIP:true
+  Subject: URGENT: Complete service outage
+  Description: Your entire platform is down. We're getting 503 on all endpoints.
+
+Your response:
+{"action_type": "respond", "ticket_id": "TKT-0042", "response_text": "I sincerely apologize for this critical outage. I have escalated to our engineering on-call team and they are investigating the 503 errors immediately. I will follow up within 15 minutes with a status update."}
+
+Note: This was the right choice because it's a VIP enterprise ticket with SLA:2 (about to breach) and very low sentiment. Respond with high empathy + concrete action."""
+
+# Max conversation history entries to include (controls token usage)
+MAX_HISTORY = 6
 
 # ── Logging Functions ──────────────────────────────────────────────────────
 
@@ -275,6 +290,8 @@ def run_task(task_name: str, task_desc: str) -> dict:
     done = result["done"]
     steps_taken = 0
     rewards: list[float] = []
+    # Multi-turn conversation history for context
+    history: list[dict] = []
 
     while not done:
         tickets = observation.get("tickets", [])
@@ -288,16 +305,20 @@ def run_task(task_name: str, task_desc: str) -> dict:
 
         user_prompt = build_user_prompt(observation)
 
+        # Build messages with conversation history
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # Include recent history so LLM knows what it already handled
+        for h in history[-MAX_HISTORY:]:
+            messages.append(h)
+        messages.append({"role": "user", "content": user_prompt})
+
         # Call LLM
         action = None
         error_msg = None
         try:
             completion = client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=messages,
                 temperature=0,
                 max_tokens=400,
             )
@@ -305,6 +326,7 @@ def run_task(task_name: str, task_desc: str) -> dict:
             action = parse_action(llm_text)
         except Exception as e:
             error_msg = str(e)
+            llm_text = ""
 
         # Fallback if LLM failed or returned unparseable output
         if action is None:
@@ -333,6 +355,10 @@ def run_task(task_name: str, task_desc: str) -> dict:
         rewards.append(reward)
         observation = result["observation"]
         done = result["done"]
+
+        # Append to conversation history for multi-turn context
+        history.append({"role": "user", "content": user_prompt})
+        history.append({"role": "assistant", "content": action_str})
 
         log_step(
             step=steps_taken,

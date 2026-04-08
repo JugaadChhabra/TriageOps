@@ -383,6 +383,30 @@ TEMPLATES: dict[TicketCategory, list[tuple[str, str, list[str], str]]] = {
             ["cancelled", "confirmation", "effective", "billing"],
             "cancellation",
         ),
+        (
+            "THIS IS UNACCEPTABLE",
+            "I have been waiting FOUR DAYS for a response to my original ticket. "
+            "This is the worst support I have ever experienced. I am filing a complaint "
+            "with the BBB if this is not resolved TODAY. Account: {email}.",
+            ["apologize", "understand", "resolve", "escalate", "priority"],
+            "abusive_complaint",
+        ),
+        (
+            "Multiple issues need resolution",
+            "I have three problems: (1) My invoice #{ref_id} is wrong — charged ${amount} "
+            "instead of ${plan_price}. (2) The {feature} dashboard has been broken since {date}. "
+            "(3) My teammate {name} still can't log in after your last update. Please help.",
+            ["invoice", "dashboard", "login", "resolved", "fixed"],
+            "multi_issue",
+        ),
+        (
+            "Third time contacting support",
+            "This is my THIRD ticket about the same issue. Previous refs: {ref_id}. "
+            "Nobody has followed up. I was promised a callback on {date} that never happened. "
+            "I need a supervisor or I'm cancelling our {current_plan} plan.",
+            ["apologize", "supervisor", "escalated", "priority", "follow up"],
+            "repeat_caller",
+        ),
     ],
 }
 
@@ -455,6 +479,7 @@ class TicketGenerator:
             ltv=ltv,
             churn_risk=round(self.rng.uniform(0.05, 0.80), 2),
             satisfaction=round(self.rng.uniform(0.3, 0.9), 2),
+            prior_interactions=self.rng.choices([0, 1, 2, 3, 5, 8], weights=[30, 25, 20, 12, 8, 5], k=1)[0],
         )
 
     def _pick_urgency(self, category: TicketCategory) -> TicketUrgency:
@@ -493,6 +518,7 @@ class TicketGenerator:
         current_step: int = 0,
         duplicate_of: Optional[str] = None,
         force_customer_tier: Optional[CustomerTier] = None,
+        vip_ratio: float = 0.0,
     ) -> Ticket:
         if category is None:
             category = self.rng.choice(list(TicketCategory))
@@ -515,6 +541,12 @@ class TicketGenerator:
         sla = self.sla_steps.get(urgency.value, 8)
         sentiment = round(max(0.1, min(0.9, 0.6 - 0.15 * (["p3", "p2", "p1", "p0"].index(urgency.value)) + self.rng.gauss(0, 0.1))), 2)
 
+        # VIP flag: carries 3x reward weight
+        is_vip = self.rng.random() < vip_ratio
+
+        # Abusive flag: based on subcategory or very low sentiment
+        is_abusive = subcategory in ("abusive_complaint", "repeat_caller") or sentiment <= 0.15
+
         return Ticket(
             id=self._next_id(),
             subject=subject,
@@ -530,15 +562,17 @@ class TicketGenerator:
             sentiment=sentiment,
             duplicate_of=duplicate_of,
             subcategory=subcategory,
+            is_vip=is_vip,
+            is_abusive=is_abusive,
         )
 
-    def generate_batch(self, count: int, current_step: int = 0) -> list[Ticket]:
-        return [self.generate_ticket(current_step=current_step) for _ in range(count)]
+    def generate_batch(self, count: int, current_step: int = 0, vip_ratio: float = 0.0) -> list[Ticket]:
+        return [self.generate_ticket(current_step=current_step, vip_ratio=vip_ratio) for _ in range(count)]
 
-    def generate_arrivals(self, rate: float, current_step: int = 0) -> list[Ticket]:
+    def generate_arrivals(self, rate: float, current_step: int = 0, vip_ratio: float = 0.0) -> list[Ticket]:
         """Poisson-distributed new ticket arrivals."""
         n = self.rng.poisson(rate) if hasattr(self.rng, "poisson") else self._poisson(rate)
-        return [self.generate_ticket(current_step=current_step) for _ in range(n)]
+        return [self.generate_ticket(current_step=current_step, vip_ratio=vip_ratio) for _ in range(n)]
 
     def _poisson(self, lam: float) -> int:
         """Simple Poisson sample using inverse transform."""

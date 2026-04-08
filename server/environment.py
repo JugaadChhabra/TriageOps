@@ -63,9 +63,18 @@ ZERO_BREACH_BONUS = 2.0
 ENTERPRISE_SLA_BONUS = 1.5
 MAX_RESOLUTION_BONUS = 1.5
 
+# VIP ticket multiplier
+VIP_MULT = 3.0
+
+# Penalty when sentiment hits 0 (customer rage-quits / auto-escalates)
+SENTIMENT_MELTDOWN_PENALTY = -1.5
+
+# Department overload penalty (escalation rejected)
+DEPT_OVERLOAD_PENALTY = -0.4
+
 # Maximum theoretical raw reward per ticket (for normalization)
-# P0 enterprise perfect response: 1.0 * 1.0 * 3.0 * 2.5 + 0.5 speed = 8.0
-MAX_REWARD_PER_TICKET = 8.0
+# P0 enterprise VIP perfect response: 1.0 * 1.0 * 3.0 * 2.5 * 3.0 + speed = 24
+MAX_REWARD_PER_TICKET = 10.0
 
 # Empathy and actionability words for response quality scoring
 EMPATHY_WORDS = [
@@ -77,6 +86,35 @@ ACTIONABILITY_PHRASES = [
     "processed", "completed", "resolved", "fixed", "refund",
     "next step", "follow up", "immediately", "right away",
 ]
+
+# Synonym map for keyword matching: allows near-miss credit
+KEYWORD_SYNONYMS: dict[str, list[str]] = {
+    "refund": ["credit", "reimbursement", "money back", "credited"],
+    "credited": ["refund", "reimbursed", "credit applied", "adjusted"],
+    "fix": ["resolve", "repair", "patch", "address", "correct"],
+    "resolved": ["fixed", "addressed", "corrected", "handled", "taken care"],
+    "fixed": ["resolved", "repaired", "patched", "corrected"],
+    "investigated": ["looked into", "reviewed", "examined", "analyzed", "checked"],
+    "restored": ["recovered", "brought back", "back online", "reactivated"],
+    "reset": ["changed", "updated", "regenerated", "reissued"],
+    "unlocked": ["reactivated", "enabled", "restored access", "unblocked"],
+    "transfer": ["move", "reassign", "migrate", "hand over"],
+    "cancelled": ["terminated", "ended", "stopped", "closed"],
+    "provided": ["sent", "shared", "delivered", "attached"],
+    "sent": ["emailed", "delivered", "shared", "provided"],
+    "confirmed": ["verified", "validated", "acknowledged"],
+    "noted": ["recorded", "logged", "acknowledged", "documented"],
+    "revoked": ["invalidated", "disabled", "deactivated", "cancelled"],
+    "patched": ["fixed", "updated", "resolved", "deployed"],
+    "deployed": ["released", "pushed", "shipped", "rolled out"],
+    "processed": ["completed", "handled", "executed", "done"],
+    "blocked": ["banned", "restricted", "denied", "blacklisted"],
+    "exported": ["downloaded", "extracted", "generated", "saved"],
+    "deleted": ["removed", "erased", "purged", "wiped"],
+    "merged": ["combined", "consolidated", "unified", "joined"],
+    "signed": ["executed", "completed", "finalized", "agreed"],
+    "apologize": ["sorry", "regret", "apologies"],
+}
 
 
 class CustomerSupportEnv:
@@ -124,9 +162,13 @@ class CustomerSupportEnv:
         self._action_history = {}
         self._initial_sla = {}
         self._normalized_reward = 0.0
+        self._dept_outages: dict[str, int] = config.department_outage or {}
+        self._dept_available: dict[str, bool] = {d.value: True for d in Department}
 
         # Generate initial tickets
-        initial = self.generator.generate_batch(config.initial_tickets, current_step=0)
+        initial = self.generator.generate_batch(
+            config.initial_tickets, current_step=0, vip_ratio=config.vip_ratio
+        )
         for t in initial:
             self.tickets[t.id] = t
             self._initial_sla[t.id] = t.sla_remaining
@@ -291,7 +333,8 @@ class CustomerSupportEnv:
 
         u_mult = URGENCY_MULT[ticket.urgency]
         t_mult = TIER_MULT[ticket.customer.tier.value]
-        base_reward = BASE_RESOLVE_REWARD * quality * u_mult * t_mult
+        vip_mult = VIP_MULT if ticket.is_vip else 1.0
+        base_reward = BASE_RESOLVE_REWARD * quality * u_mult * t_mult * vip_mult
 
         # Speed bonus: decaying reward based on how quickly ticket is addressed
         initial_sla = self._initial_sla.get(ticket.id, ticket.sla_remaining)
@@ -313,6 +356,7 @@ class CustomerSupportEnv:
             "ticket_id": ticket.id,
             "quality": round(quality, 4),
             "speed_bonus": round(speed_bonus, 4),
+            "is_vip": ticket.is_vip,
             "reward": reward,
         }
 
@@ -320,6 +364,24 @@ class CustomerSupportEnv:
         target_dept = action.target_department
         if target_dept is None:
             return INVALID_ACTION_PENALTY, {"error": "Escalation requires target_department"}
+
+        # Department outage check
+        if not self._dept_available.get(target_dept.value, True):
+            return DEPT_OVERLOAD_PENALTY, {
+                "error": f"Department {target_dept.value} is currently unavailable (outage)",
+                "penalty": "dept_outage",
+                "reward": DEPT_OVERLOAD_PENALTY,
+            }
+
+        # Department capacity check
+        dept_cap = self.config.department_capacity if self.config else 10
+        current_load = self.department_queues.get(target_dept, 0)
+        if current_load >= dept_cap:
+            return DEPT_OVERLOAD_PENALTY, {
+                "error": f"Department {target_dept.value} is overloaded ({current_load}/{dept_cap})",
+                "penalty": "dept_overload",
+                "reward": DEPT_OVERLOAD_PENALTY,
+            }
 
         correct = target_dept == ticket.required_department
         u_mult = URGENCY_MULT[ticket.urgency]
@@ -406,11 +468,18 @@ class CustomerSupportEnv:
 
         response_lower = response.lower()
 
-        # Keyword coverage (40%)
+        # Keyword coverage with synonym expansion (40%)
+        # Lightweight semantic overlap: check for exact keywords OR common synonyms
         keywords = ticket.resolution_keywords
         if keywords:
-            matched = sum(1 for kw in keywords if kw.lower() in response_lower)
-            keyword_score = matched / len(keywords)
+            matched = 0
+            for kw in keywords:
+                kw_lower = kw.lower()
+                if kw_lower in response_lower:
+                    matched += 1
+                elif any(syn in response_lower for syn in KEYWORD_SYNONYMS.get(kw_lower, [])):
+                    matched += 0.7  # partial credit for synonym
+            keyword_score = min(1.0, matched / len(keywords))
         else:
             keyword_score = 0.5
 
@@ -481,10 +550,32 @@ class CustomerSupportEnv:
         self.current_step += 1
         self.actions_this_step = 0
 
+        # Activate department outages at configured steps
+        for dept_name, outage_step in self._dept_outages.items():
+            if self.current_step >= outage_step:
+                self._dept_available[dept_name] = False
+
         # Tick SLAs and decay sentiment
         for ticket in list(self.tickets.values()):
             ticket.sla_remaining -= 1
-            ticket.sentiment = round(max(0.0, ticket.sentiment - SENTIMENT_DECAY), 2)
+
+            # Sentiment decays faster for VIP and abusive tickets
+            decay = SENTIMENT_DECAY
+            if ticket.is_vip:
+                decay *= 1.5
+            if ticket.is_abusive:
+                decay *= 2.0
+            ticket.sentiment = round(max(0.0, ticket.sentiment - decay), 2)
+
+            # Sentiment meltdown: customer rage-quits when sentiment hits 0
+            if ticket.sentiment <= 0.0 and ticket.status in (
+                TicketStatus.OPEN, TicketStatus.IN_PROGRESS
+            ):
+                ticket.status = TicketStatus.BREACHED
+                vip_mult = VIP_MULT if ticket.is_vip else 1.0
+                meltdown = round(SENTIMENT_MELTDOWN_PENALTY * URGENCY_MULT[ticket.urgency] * vip_mult, 4)
+                self.total_reward = round(self.total_reward + meltdown, 4)
+                continue  # skip further checks for this ticket
 
             # Critical-ignore penalty: P0/P1 tickets sitting untouched (still OPEN) lose reward
             if (ticket.status == TicketStatus.OPEN
@@ -505,10 +596,13 @@ class CustomerSupportEnv:
 
         self._update_normalized_reward()
 
+        vip_ratio = self.config.vip_ratio if self.config else 0.0
+
         # New arrivals via Poisson process
         if self.config and self.config.arrival_rate > 0 and self.generator:
             arrivals = self.generator.generate_arrivals(
-                self.config.arrival_rate, current_step=self.current_step
+                self.config.arrival_rate, current_step=self.current_step,
+                vip_ratio=vip_ratio,
             )
             for t in arrivals:
                 self.tickets[t.id] = t
@@ -741,11 +835,15 @@ class CustomerSupportEnv:
             tv.id for tv in ticket_views if tv.sla_remaining <= 2
         ]
 
+        dept_cap = self.config.department_capacity if self.config else 10
         dept_status = [
             DepartmentStatus(
                 name=dept,
                 queue_size=self.department_queues.get(dept, 0),
-                available=True,
+                available=(
+                    self._dept_available.get(dept.value, True)
+                    and self.department_queues.get(dept, 0) < dept_cap
+                ),
             )
             for dept in Department
         ]
