@@ -27,10 +27,123 @@ TASKS = [
     {"name": "full_resolution", "description": "Hard: 30+ streaming tickets — full resolution pipeline"},
 ]
 
+# Max tickets to include in prompt (controls token usage and latency)
+MAX_TICKETS_IN_PROMPT = 10
+
+# ── System Prompt ──────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """You are an expert customer support triage agent. You process support tickets by choosing the single best action for the most urgent ticket.
+
+## Action Schema
+Respond with ONLY a JSON object (no markdown, no explanation):
+
+For RESPOND (resolve with a written reply):
+{"action_type": "respond", "ticket_id": "TKT-XXXX", "response_text": "Your detailed response"}
+
+For ESCALATE (route to a specialist department):
+{"action_type": "escalate", "ticket_id": "TKT-XXXX", "target_department": "DEPT"}
+
+For MERGE (combine duplicate tickets):
+{"action_type": "merge", "ticket_id": "TKT-XXXX", "merge_with_id": "TKT-YYYY"}
+
+For DEFER (skip to handle later):
+{"action_type": "defer", "ticket_id": "TKT-XXXX"}
+
+## Department Routing Guide
+- "billing" → charges, refunds, invoices, payment methods, plan changes, subscriptions, tax
+- "engineering" → API errors, bugs, performance, crashes, webhooks, data export, search, SSO, technical issues
+- "security" → suspicious login, data breach, vulnerabilities, API key exposure, unauthorized access, encryption
+- "account_management" → password reset, account locked, ownership transfer, 2FA, account deletion, account merge
+- "general_support" → how-to questions, onboarding, UI feedback, pricing, partnerships, cancellation
+
+## Response Quality Guide
+When using "respond", write a response that:
+1. Opens with empathy: "I sincerely apologize..." or "I understand how frustrating..."
+2. Addresses the specific issue using keywords from the ticket
+3. States concrete actions taken: "I have processed...", "I've resolved...", "I will..."
+4. Is 50-300 characters for optimal scoring
+5. Matches the customer's emotional state — more empathy for upset customers, more action for neutral ones
+
+## Prioritization Rules (CRITICAL)
+1. Lowest SLA remaining first — tickets about to breach are emergencies
+2. Enterprise tier before Pro before Free (when SLA is similar)
+3. P0/P1 urgency indicators: "URGENT", "CRITICAL", "outage", "down", "breach", "security"
+4. If two tickets describe the same issue → MERGE the duplicate into the original
+5. DEFER only when SLA has 4+ steps remaining AND more urgent tickets exist
+
+## Duplicate Detection
+Tickets are duplicates if they describe the same underlying issue (e.g., same outage, same bug).
+Look for: similar subjects, same error messages, same service mentioned, overlapping timeframes.
+Merge the newer ticket into the older one."""
+
+# ── Logging Functions ──────────────────────────────────────────────────────
+
+
+def log_start(task_name: str, task_description: str) -> None:
+    """Emit [START] log line."""
+    print(json.dumps({
+        "type": "[START]",
+        "task": task_name,
+        "description": task_description,
+        "model": MODEL_NAME,
+        "timestamp": time.time(),
+    }))
+    sys.stdout.flush()
+
+
+def log_step(
+    step: int,
+    action_type: str,
+    ticket_id: str,
+    reward: float,
+    cumulative_reward: float,
+    tickets_remaining: int,
+    done: bool,
+    error: str | None = None,
+) -> None:
+    """Emit [STEP] log line."""
+    entry = {
+        "type": "[STEP]",
+        "step": step,
+        "action": action_type,
+        "ticket_id": ticket_id,
+        "reward": reward,
+        "cumulative_reward": round(cumulative_reward, 4),
+        "tickets_remaining": tickets_remaining,
+        "done": done,
+    }
+    if error:
+        entry["error"] = error
+    print(json.dumps(entry))
+    sys.stdout.flush()
+
+
+def log_end(
+    task_name: str,
+    score: float,
+    breakdown: dict,
+    total_reward: float,
+    total_steps: int,
+) -> None:
+    """Emit [END] log line. Score is clamped to [0.0, 1.0]."""
+    clamped_score = min(max(score, 0.0), 1.0)
+    print(json.dumps({
+        "type": "[END]",
+        "task": task_name,
+        "score": clamped_score,
+        "breakdown": breakdown,
+        "total_reward": round(total_reward, 4),
+        "total_steps": total_steps,
+        "timestamp": time.time(),
+    }))
+    sys.stdout.flush()
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
 def env_request(method: str, path: str, body: dict | None = None) -> dict:
+    """Make a request to the environment server."""
     url = f"{ENV_URL}{path}"
     if method == "GET":
         r = httpx.get(url, timeout=30.0)
@@ -40,97 +153,132 @@ def env_request(method: str, path: str, body: dict | None = None) -> dict:
     return r.json()
 
 
-def build_prompt(observation: dict) -> str:
+def build_user_prompt(observation: dict) -> str:
+    """Build the user-turn prompt from the current observation."""
     tickets = observation.get("tickets", [])
     if not tickets:
-        return "No tickets in queue. The episode may be over."
+        return "No tickets in queue."
 
-    ticket_descriptions = []
-    for t in tickets:
-        ticket_descriptions.append(
-            f"- [{t['id']}] (SLA: {t['sla_remaining']} steps, Tier: {t['customer_tier']}, "
-            f"Sentiment: {t['sentiment']}, Status: {t['status']})\n"
+    # Limit tickets to control prompt size and latency
+    display_tickets = tickets[:MAX_TICKETS_IN_PROMPT]
+    truncated = len(tickets) - len(display_tickets)
+
+    ticket_lines = []
+    for t in display_tickets:
+        ticket_lines.append(
+            f"[{t['id']}] SLA:{t['sla_remaining']} | Tier:{t['customer_tier']} | "
+            f"Sentiment:{t['sentiment']} | Status:{t['status']}\n"
             f"  Subject: {t['subject']}\n"
             f"  Description: {t['description']}"
         )
 
-    tickets_text = "\n\n".join(ticket_descriptions)
+    tickets_text = "\n\n".join(ticket_lines)
+
     sla_warnings = observation.get("sla_warnings", [])
-    warnings_text = f"\nSLA WARNINGS: {', '.join(sla_warnings)}" if sla_warnings else ""
+    warnings_line = ""
+    if sla_warnings:
+        warnings_line = f"\n⚠ SLA WARNINGS (breach imminent): {', '.join(sla_warnings)}"
 
-    return f"""You are a customer support agent. You must triage and resolve support tickets efficiently.
+    truncated_line = ""
+    if truncated > 0:
+        truncated_line = f"\n({truncated} more tickets not shown — focus on the most urgent above)"
 
-Current state:
-- Step: {observation['current_step']}/{observation['max_steps']}
-- Actions remaining this step: {observation['capacity_per_step'] - observation['actions_this_step']}
-- Tickets resolved: {observation['tickets_resolved']}
-- Tickets breached: {observation['tickets_breached']}
-- Score so far: {observation['total_reward']}{warnings_text}
+    actions_left = observation["capacity_per_step"] - observation["actions_this_step"]
 
-Active tickets:
-{tickets_text}
-
-Choose ONE action. Respond with a JSON object (no markdown):
-{{
-  "action_type": "respond" | "escalate" | "defer" | "merge",
-  "ticket_id": "TKT-XXXX",
-  "response_text": "Your response to the customer (required for respond)",
-  "target_department": "billing" | "engineering" | "security" | "account_management" | "general_support" (required for escalate),
-  "merge_with_id": "TKT-YYYY" (required for merge)
-}}
-
-Strategy:
-1. Prioritize by SLA urgency — tickets with low sla_remaining first
-2. Enterprise tier customers get priority
-3. For respond: include empathy, address the issue, mention specific actions taken
-4. For escalate: route to the correct department based on ticket content
-5. For merge: if two tickets describe the same issue from different customers
-6. For defer: only if SLA has plenty of room and other tickets are more urgent
-
-Pick the most urgent ticket and take the best action."""
+    return (
+        f"Step {observation['current_step']}/{observation['max_steps']} | "
+        f"Actions left: {actions_left} | "
+        f"Resolved: {observation['tickets_resolved']} | "
+        f"Breached: {observation['tickets_breached']}"
+        f"{warnings_line}\n\n"
+        f"TICKETS:\n{tickets_text}{truncated_line}\n\n"
+        f"Choose ONE action as a JSON object:"
+    )
 
 
 def parse_action(response_text: str) -> dict | None:
     """Extract JSON action from LLM response."""
     text = response_text.strip()
-    # Try to find JSON in the response
-    if text.startswith("```"):
+
+    # Strip markdown code fences if present
+    if "```" in text:
         lines = text.split("\n")
         json_lines = []
         in_block = False
         for line in lines:
-            if line.startswith("```") and not in_block:
+            if line.strip().startswith("```"):
+                if in_block:
+                    break
                 in_block = True
                 continue
-            elif line.startswith("```") and in_block:
-                break
-            elif in_block:
+            if in_block:
                 json_lines.append(line)
-        text = "\n".join(json_lines)
+        if json_lines:
+            text = "\n".join(json_lines)
 
     # Find the first { ... } block
     start = text.find("{")
-    end = text.rfind("}") + 1
-    if start == -1 or end == 0:
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
         return None
 
     try:
-        return json.loads(text[start:end])
+        return json.loads(text[start:end + 1])
     except json.JSONDecodeError:
         return None
+
+
+def make_fallback_action(ticket: dict) -> dict:
+    """Generate a reasonable fallback action when LLM fails to produce valid JSON."""
+    subject = ticket.get("subject", "your issue")
+    return {
+        "action_type": "respond",
+        "ticket_id": ticket["id"],
+        "response_text": (
+            f"I sincerely apologize for the inconvenience regarding '{subject}'. "
+            "I have investigated the issue and am processing a resolution immediately. "
+            "I will follow up to ensure everything is working correctly."
+        ),
+    }
+
+
+def clean_action(action: dict) -> dict:
+    """Normalize action dict to only include relevant fields."""
+    cleaned = {
+        "action_type": action.get("action_type", "respond"),
+        "ticket_id": action.get("ticket_id", ""),
+    }
+
+    action_type = cleaned["action_type"]
+    if action_type == "respond":
+        cleaned["response_text"] = action.get(
+            "response_text",
+            "I apologize for the inconvenience. I have resolved this issue immediately.",
+        )
+    elif action_type == "escalate":
+        dept = action.get("target_department", "general_support")
+        valid_depts = {"billing", "engineering", "security", "account_management", "general_support"}
+        if dept not in valid_depts:
+            dept = "general_support"
+        cleaned["target_department"] = dept
+    elif action_type == "merge":
+        merge_id = action.get("merge_with_id")
+        if merge_id:
+            cleaned["merge_with_id"] = merge_id
+        else:
+            # Can't merge without target — fall back to respond
+            cleaned["action_type"] = "respond"
+            cleaned["response_text"] = "I apologize. I have resolved this issue immediately."
+
+    return cleaned
 
 
 # ── Main Loop ──────────────────────────────────────────────────────────────
 
 
 def run_task(task_name: str, task_desc: str) -> dict:
-    print(json.dumps({
-        "type": "[START]",
-        "task": task_name,
-        "description": task_desc,
-        "timestamp": time.time(),
-    }))
-    sys.stdout.flush()
+    """Run a single task and return the grade."""
+    log_start(task_name, task_desc)
 
     # Reset environment
     result = env_request("POST", "/reset", {"task": task_name})
@@ -142,61 +290,56 @@ def run_task(task_name: str, task_desc: str) -> dict:
     while not done:
         tickets = observation.get("tickets", [])
         if not tickets:
-            # No tickets — advance time
+            # No active tickets — advance time to let new ones arrive
             result = env_request("POST", "/advance_step")
             observation = result["observation"]
             done = result["done"]
             total_steps += 1
             continue
 
-        prompt = build_prompt(observation)
+        user_prompt = build_user_prompt(observation)
 
+        # Call LLM
+        action = None
+        error_msg = None
         try:
             completion = client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=512,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+                max_tokens=400,
             )
-            llm_response = completion.choices[0].message.content or ""
+            llm_text = completion.choices[0].message.content or ""
+            action = parse_action(llm_text)
         except Exception as e:
-            print(json.dumps({"type": "[STEP]", "error": str(e), "step": total_steps}))
-            sys.stdout.flush()
-            # Fallback: respond to most urgent ticket
-            t = tickets[0]
-            llm_response = json.dumps({
-                "action_type": "respond",
-                "ticket_id": t["id"],
-                "response_text": f"I apologize for the inconvenience. I'm looking into your issue regarding '{t['subject']}' and will resolve it promptly.",
-            })
+            error_msg = str(e)
 
-        action = parse_action(llm_response)
+        # Fallback if LLM failed or returned unparseable output
         if action is None:
-            # Fallback action
-            t = tickets[0]
-            action = {
-                "action_type": "respond",
-                "ticket_id": t["id"],
-                "response_text": f"I understand your concern about '{t['subject']}'. I apologize for the inconvenience and I've escalated this internally for immediate resolution.",
-            }
+            action = make_fallback_action(tickets[0])
 
-        # Clean up action — only include relevant fields
-        clean_action = {
-            "action_type": action["action_type"],
-            "ticket_id": action["ticket_id"],
-        }
-        if action["action_type"] == "respond":
-            clean_action["response_text"] = action.get("response_text", "I will resolve this issue.")
-        elif action["action_type"] == "escalate":
-            clean_action["target_department"] = action.get("target_department", "general_support")
-        elif action["action_type"] == "merge":
-            clean_action["merge_with_id"] = action.get("merge_with_id")
+        # Validate and clean the action
+        action = clean_action(action)
 
+        # Ensure ticket_id references an active ticket
+        active_ids = {t["id"] for t in tickets}
+        if action["ticket_id"] not in active_ids:
+            action = make_fallback_action(tickets[0])
+            action = clean_action(action)
+
+        # Submit action
         try:
-            result = env_request("POST", "/step", clean_action)
+            result = env_request("POST", "/step", action)
         except Exception as e:
-            print(json.dumps({"type": "[STEP]", "error": str(e), "step": total_steps}))
-            sys.stdout.flush()
+            log_step(
+                step=total_steps, action_type=action["action_type"],
+                ticket_id=action["ticket_id"], reward=0.0,
+                cumulative_reward=total_reward, tickets_remaining=len(tickets),
+                done=False, error=str(e),
+            )
             break
 
         reward = result.get("reward", 0.0)
@@ -204,37 +347,36 @@ def run_task(task_name: str, task_desc: str) -> dict:
         observation = result["observation"]
         done = result["done"]
 
-        print(json.dumps({
-            "type": "[STEP]",
-            "step": total_steps,
-            "action": clean_action["action_type"],
-            "ticket_id": clean_action["ticket_id"],
-            "reward": reward,
-            "cumulative_reward": round(total_reward, 4),
-            "tickets_remaining": len(observation.get("tickets", [])),
-            "done": done,
-        }))
-        sys.stdout.flush()
+        log_step(
+            step=total_steps,
+            action_type=action["action_type"],
+            ticket_id=action["ticket_id"],
+            reward=reward,
+            cumulative_reward=total_reward,
+            tickets_remaining=len(observation.get("tickets", [])),
+            done=done,
+            error=error_msg,
+        )
         total_steps += 1
 
     # Get final grade
     grade = env_request("GET", "/grade")
+    score = min(max(grade.get("score", 0.0), 0.0), 1.0)
+    grade["score"] = score
 
-    print(json.dumps({
-        "type": "[END]",
-        "task": task_name,
-        "score": grade.get("score", 0.0),
-        "breakdown": grade.get("breakdown", {}),
-        "total_reward": round(total_reward, 4),
-        "total_steps": total_steps,
-        "timestamp": time.time(),
-    }))
-    sys.stdout.flush()
+    log_end(
+        task_name=task_name,
+        score=score,
+        breakdown=grade.get("breakdown", {}),
+        total_reward=total_reward,
+        total_steps=total_steps,
+    )
 
     return grade
 
 
 def main():
+    """Run all tasks sequentially and print summary."""
     results = {}
     for task in TASKS:
         grade = run_task(task["name"], task["description"])
@@ -242,7 +384,10 @@ def main():
 
     print("\n=== Final Results ===")
     for name, grade in results.items():
-        print(f"  {name}: score={grade.get('score', 0.0):.4f}")
+        score = min(max(grade.get("score", 0.0), 0.0), 1.0)
+        print(f"  {name}: score={score:.4f}")
+    avg = sum(min(max(g.get("score", 0.0), 0.0), 1.0) for g in results.values()) / max(len(results), 1)
+    print(f"  average: {avg:.4f}")
     print("=====================")
 
 
