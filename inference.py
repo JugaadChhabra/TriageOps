@@ -14,10 +14,14 @@ from openai import OpenAI
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-HF_TOKEN = os.environ.get("HF_TOKEN", os.environ.get("OPENAI_API_KEY", ""))
-ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+HF_TOKEN = os.getenv("HF_TOKEN")
+ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
+
+if HF_TOKEN is None:
+    print("[WARN] HF_TOKEN not set — LLM calls will fail, using fallback actions", flush=True)
+    HF_TOKEN = "not-set"
 
 client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
@@ -98,14 +102,8 @@ SUCCESS_SCORE_THRESHOLD = 0.5
 
 
 def log_start(task: str, env: str, model: str) -> None:
-    """Emit [START] log line matching OpenEnv sample format."""
-    print(json.dumps({
-        "type": "[START]",
-        "task": task,
-        "env": env,
-        "model": model,
-        "timestamp": time.time(),
-    }), flush=True)
+    """Emit [START] line in exact OpenEnv plain-text format."""
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
 def log_step(
@@ -115,32 +113,21 @@ def log_step(
     done: bool,
     error: str | None = None,
 ) -> None:
-    """Emit [STEP] log line matching OpenEnv sample format."""
-    print(json.dumps({
-        "type": "[STEP]",
-        "step": step,
-        "action": action,
-        "reward": reward,
-        "done": done,
-        "error": error,
-    }), flush=True)
+    """Emit [STEP] line in exact OpenEnv plain-text format."""
+    done_str = "true" if done else "false"
+    error_str = error if error else "null"
+    print(f"[STEP] step={step} action={action} reward={reward:.2f} done={done_str} error={error_str}", flush=True)
 
 
 def log_end(
     success: bool,
     steps: int,
-    score: float,
     rewards: list[float],
 ) -> None:
-    """Emit [END] log line matching OpenEnv sample format. Score clamped to [0.0, 1.0]."""
-    print(json.dumps({
-        "type": "[END]",
-        "success": success,
-        "steps": steps,
-        "score": min(max(score, 0.0), 1.0),
-        "rewards": [round(r, 4) for r in rewards],
-        "timestamp": time.time(),
-    }), flush=True)
+    """Emit [END] line in exact OpenEnv plain-text format. Always called, even on exception."""
+    success_str = "true" if success else "false"
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"[END] success={success_str} steps={steps} rewards={rewards_str}", flush=True)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -281,101 +268,104 @@ def clean_action(action: dict) -> dict:
 
 
 def run_task(task_name: str, task_desc: str) -> dict:
-    """Run a single task and return the grade."""
+    """Run a single task and return the grade. Always emits [END], even on exception."""
     log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
-    # Reset environment
-    result = env_request("POST", "/reset", {"task": task_name})
-    observation = result["observation"]
-    done = result["done"]
     steps_taken = 0
     rewards: list[float] = []
-    # Multi-turn conversation history for context
-    history: list[dict] = []
+    grade: dict = {"score": 0.0, "breakdown": {}}
 
-    while not done:
-        tickets = observation.get("tickets", [])
-        if not tickets:
-            # No active tickets — advance time to let new ones arrive
-            result = env_request("POST", "/advance_step")
-            observation = result["observation"]
-            done = result["done"]
-            steps_taken += 1
-            continue
-
-        user_prompt = build_user_prompt(observation)
-
-        # Build messages with conversation history
-        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        # Include recent history so LLM knows what it already handled
-        for h in history[-MAX_HISTORY:]:
-            messages.append(h)
-        messages.append({"role": "user", "content": user_prompt})
-
-        # Call LLM
-        action = None
-        error_msg = None
-        try:
-            completion = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                temperature=0,
-                max_tokens=400,
-            )
-            llm_text = completion.choices[0].message.content or ""
-            action = parse_action(llm_text)
-        except Exception as e:
-            error_msg = str(e)
-            llm_text = ""
-
-        # Fallback if LLM failed or returned unparseable output
-        if action is None:
-            action = make_fallback_action(tickets[0])
-
-        # Validate and clean the action
-        action = clean_action(action)
-
-        # Ensure ticket_id references an active ticket
-        active_ids = {t["id"] for t in tickets}
-        if action["ticket_id"] not in active_ids:
-            action = make_fallback_action(tickets[0])
-            action = clean_action(action)
-
-        # Build action description string for log
-        action_str = json.dumps(action, separators=(",", ":"))
-
-        # Submit action
-        try:
-            result = env_request("POST", "/step", action)
-        except Exception as e:
-            log_step(step=steps_taken, action=action_str, reward=0.0, done=False, error=str(e))
-            break
-
-        reward = result.get("reward", 0.0)
-        rewards.append(reward)
+    try:
+        # Reset environment
+        result = env_request("POST", "/reset", {"task": task_name})
         observation = result["observation"]
         done = result["done"]
+        # Multi-turn conversation history for context
+        history: list[dict] = []
 
-        # Append to conversation history for multi-turn context
-        history.append({"role": "user", "content": user_prompt})
-        history.append({"role": "assistant", "content": action_str})
+        while not done:
+            tickets = observation.get("tickets", [])
+            if not tickets:
+                # No active tickets — advance time to let new ones arrive
+                result = env_request("POST", "/advance_step")
+                observation = result["observation"]
+                done = result["done"]
+                steps_taken += 1
+                continue
 
-        log_step(
-            step=steps_taken,
-            action=action_str,
-            reward=reward,
-            done=done,
-            error=error_msg,
-        )
-        steps_taken += 1
+            user_prompt = build_user_prompt(observation)
 
-    # Get final grade
-    grade = env_request("GET", "/grade")
-    score = min(max(grade.get("score", 0.0), 0.0), 1.0)
-    grade["score"] = score
-    success = score >= SUCCESS_SCORE_THRESHOLD
+            # Build messages with conversation history
+            messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+            for h in history[-MAX_HISTORY:]:
+                messages.append(h)
+            messages.append({"role": "user", "content": user_prompt})
 
-    log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+            # Call LLM
+            action = None
+            error_msg = None
+            try:
+                completion = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=400,
+                )
+                llm_text = completion.choices[0].message.content or ""
+                action = parse_action(llm_text)
+            except Exception as e:
+                error_msg = str(e)
+
+            # Fallback if LLM failed or returned unparseable output
+            if action is None:
+                action = make_fallback_action(tickets[0])
+
+            # Validate and clean the action
+            action = clean_action(action)
+
+            # Ensure ticket_id references an active ticket
+            active_ids = {t["id"] for t in tickets}
+            if action["ticket_id"] not in active_ids:
+                action = make_fallback_action(tickets[0])
+                action = clean_action(action)
+
+            # Build action description string for log
+            action_str = json.dumps(action, separators=(",", ":"))
+
+            # Submit action
+            try:
+                result = env_request("POST", "/step", action)
+            except Exception as e:
+                log_step(step=steps_taken, action=action_str, reward=0.0, done=False, error=str(e))
+                break
+
+            reward = result.get("reward", 0.0)
+            rewards.append(reward)
+            observation = result["observation"]
+            done = result["done"]
+
+            # Append to conversation history for multi-turn context
+            history.append({"role": "user", "content": user_prompt})
+            history.append({"role": "assistant", "content": action_str})
+
+            log_step(
+                step=steps_taken,
+                action=action_str,
+                reward=reward,
+                done=done,
+                error=error_msg,
+            )
+            steps_taken += 1
+
+        # Get final grade
+        grade = env_request("GET", "/grade")
+        score = min(max(grade.get("score", 0.0), 0.0), 1.0)
+        grade["score"] = score
+
+    finally:
+        # [END] is ALWAYS emitted, even on exception
+        success = grade.get("score", 0.0) >= SUCCESS_SCORE_THRESHOLD
+        log_end(success=success, steps=steps_taken, rewards=rewards)
 
     return grade
 
