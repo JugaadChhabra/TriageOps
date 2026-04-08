@@ -1,6 +1,7 @@
 name: supportbench
 description: "AI Customer Support Ops — triage and resolve tickets under SLA pressure"
 version: "1.0.0"
+author: "TriageOps Team"
 
 endpoints:
   reset: POST /reset
@@ -18,6 +19,95 @@ tasks:
   - name: full_resolution
     description: "Hard: 30+ streaming tickets — classify, prioritize, respond, detect duplicates, escalate under time pressure"
     config_path: server/tasks/task3.json
+
+action_space:
+  type: object
+  model: server.models.SupportAction
+  properties:
+    action_type:
+      type: string
+      enum: [respond, escalate, defer, merge]
+      description: "Type of action to take on the ticket"
+    ticket_id:
+      type: string
+      description: "Target ticket ID (e.g. TKT-0001)"
+    response_text:
+      type: string
+      description: "Response text for the customer (required for respond action)"
+      optional: true
+    target_department:
+      type: string
+      enum: [billing, engineering, security, account_management, general_support]
+      description: "Department to escalate to (required for escalate action)"
+      optional: true
+    merge_with_id:
+      type: string
+      description: "ID of ticket to merge into (required for merge action)"
+      optional: true
+
+observation_space:
+  type: object
+  model: server.models.QueueObservation
+  properties:
+    tickets:
+      type: array
+      items:
+        model: server.models.TicketView
+      description: "Visible ticket queue sorted by SLA urgency"
+    current_step:
+      type: integer
+      description: "Current time step in the episode"
+    max_steps:
+      type: integer
+      description: "Maximum time steps for this task"
+    actions_this_step:
+      type: integer
+      description: "Actions already taken this step"
+    capacity_per_step:
+      type: integer
+      description: "Maximum actions allowed per step"
+    department_status:
+      type: array
+      items:
+        model: server.models.DepartmentStatus
+      description: "Queue size and availability per department"
+    sla_warnings:
+      type: array
+      items:
+        type: string
+      description: "Ticket IDs with SLA remaining <= 2 steps"
+    total_reward:
+      type: number
+      description: "Cumulative raw reward"
+    normalized_reward:
+      type: number
+      description: "Reward normalized to 0.0-1.0 range"
+    tickets_resolved:
+      type: integer
+    tickets_breached:
+      type: integer
+    tickets_escalated:
+      type: integer
+
+reward_space:
+  type: number
+  description: "Per-action reward (dense). Positive for good actions, negative for bad."
+  range: [-3.5, 8.0]
+
+grade_output:
+  type: object
+  model: server.models.GradeResult
+  properties:
+    score:
+      type: number
+      range: [0.0, 1.0]
+      description: "Overall weighted score"
+    breakdown:
+      type: object
+      description: "Per-component scores (resolution_rate, prioritization, sla_compliance, response_quality, duplicate_detection, classification_accuracy, critical_coverage)"
+    details:
+      type: object
+      description: "Human-readable details (total_tickets, resolved, breached, total_reward, normalized_reward)"
 
 models:
   - server.models

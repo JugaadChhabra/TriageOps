@@ -24,7 +24,7 @@ This creates a realistic benchmark for evaluating AI agents on **planning under 
 ### Episode Loop
 
 ```
-reset(task_id) → initial observation
+reset(task) → initial observation
   └─ for each step:
        agent sees ticket queue + constraints
        agent picks action (respond / escalate / defer / merge)
@@ -41,13 +41,15 @@ grade() → final score 0.0–1.0
 | `tickets` | `List[TicketView]` | Open tickets with subject, description, sentiment, SLA, customer info |
 | `current_step` | `int` | Current time step |
 | `max_steps` | `int` | Total episode length |
-| `actions_remaining` | `int` | Actions left this step |
+| `actions_this_step` | `int` | Actions taken this step |
 | `capacity_per_step` | `int` | Max actions per step |
-| `departments` | `List[DepartmentStatus]` | Department backlog and availability |
+| `department_status` | `List[DepartmentStatus]` | Department backlog and availability |
 | `sla_warnings` | `List[str]` | Ticket IDs with SLA ≤ 2 steps |
-| `resolved_count` | `int` | Total resolved so far |
-| `breached_count` | `int` | Total SLA breaches |
-| `score_so_far` | `float` | Running normalized score |
+| `total_reward` | `float` | Cumulative raw reward |
+| `normalized_reward` | `float` | Reward normalized to 0.0–1.0 |
+| `tickets_resolved` | `int` | Total resolved so far |
+| `tickets_breached` | `int` | Total SLA breaches |
+| `tickets_escalated` | `int` | Total escalated |
 
 **Note:** The agent does NOT see ground-truth category or urgency labels. It must infer these from the ticket description text.
 
@@ -56,24 +58,26 @@ grade() → final score 0.0–1.0
 | Action | Required Fields | Description |
 |--------|----------------|-------------|
 | `respond` | `ticket_id`, `response_text` | Resolve a ticket with a written response |
-| `escalate` | `ticket_id`, `target_department` | Route to: billing, engineering, account_management, legal, general |
+| `escalate` | `ticket_id`, `target_department` | Route to: billing, engineering, security, account_management, general_support |
 | `defer` | `ticket_id` | Skip this ticket to handle higher-priority ones |
 | `merge` | `ticket_id`, `merge_with_id` | Merge a duplicate into another ticket |
 
 ### Reward Design
 
 **Per-action (dense):**
-- Resolve: `base × quality × urgency_mult × tier_mult` (0.3–5.0)
-- Correct escalation: +0.5–1.0
-- Good merge: +0.3
-- Smart defer (higher-priority exists): +0.1
+- Resolve: `base × quality × urgency_mult × tier_mult + speed_bonus` (0.3–8.0)
+- Correct escalation: +0.5 + speed bonus
+- Good merge (actual duplicate): +0.3
+- Smart defer (SLA has room): +0.1
 - Wrong department: -0.3
+- Empty close (< 10 chars): -0.4
+- Repeat action on same ticket: -0.3
 - Invalid action: -0.2
 
 **Per-step (continuous pressure):**
-- SLA near-breach: -0.05 per ticket per step
-- Sentiment decay: -0.02 per waiting ticket per step
-- SLA breach: -1.0 × urgency multiplier
+- Critical ticket ignored (P0/P1 still OPEN): -0.15 × urgency multiplier
+- Sentiment decay: -0.05 per waiting ticket per step
+- SLA breach: -1.0 × urgency multiplier + -0.5 forced-escalation penalty
 
 **Episode bonuses:**
 - Zero breaches: +2.0
@@ -84,39 +88,42 @@ grade() → final score 0.0–1.0
 
 ## Tasks
 
-### Task 1: Morning Shift (Easy)
-- **Scenario:** 10 clear-cut tickets, no new arrivals, generous SLAs (6–10 steps)
-- **Capacity:** 3 actions/step, 5 steps
-- **Tests:** Basic classification, response quality, correct routing
-- **Expected scores:** Frontier models 0.7+, mid-tier 0.4–0.6
+### Task 1: Ticket Classification (Easy)
+- **Scenario:** 10 clear-cut tickets, no new arrivals, generous SLAs (10–20 steps), unlimited capacity
+- **Tests:** Correct department routing, category-appropriate responses
+- **Grader emphasis:** Classification accuracy (50%), resolution rate (30%)
+- **Threshold:** 0.8+ for success
 
-### Task 2: Peak Hours (Medium)
-- **Scenario:** 15 initial tickets + ~3.5 arrivals/step, 15% duplicates, tight SLAs (4–7)
-- **Capacity:** 3 actions/step, 8 steps
-- **Tests:** Prioritization under pressure, duplicate detection, triage strategy
-- **Expected scores:** Frontier models 0.5–0.7, mid-tier 0.25–0.4
+### Task 2: Triage & Prioritize (Medium)
+- **Scenario:** 20 mixed-urgency tickets, 5 actions/step × 4 steps = exactly 20 slots, no arrivals
+- **Tests:** Urgency-appropriate ordering, critical ticket coverage, no P0/P1 left unhandled
+- **Grader emphasis:** Prioritization (30%), critical coverage (30%)
+- **Challenge:** Tight SLAs mean P0 tickets breach in 2 steps if ignored
 
-### Task 3: Outage Crisis (Hard)
-- **Scenario:** 10 initial + burst of 10 outage tickets at step 3 (60% duplicates), enterprise churn risk, compliance ticket buried in noise, engineering dept overloaded
-- **Capacity:** 4 actions/step, 12 steps
-- **Tests:** Crisis management, batch duplicate handling, strategic deferral, composure
-- **Expected scores:** Frontier models 0.3–0.5, mid-tier 0.1–0.25
+### Task 3: Full Resolution Pipeline (Hard)
+- **Scenario:** 20 initial + Poisson arrivals (rate 3.0) + 2 burst events (step 2: 8 tickets, step 5: 12 tickets) = 50+ total
+- **Capacity:** 5 actions/step × 10 steps = 50 slots (barely enough)
+- **Tests:** Classification, prioritization, response quality, duplicate detection, escalation routing — all simultaneously
+- **Grader emphasis:** All 7 dimensions weighted equally (15% each + 10% critical coverage)
+- **Challenge:** Even an omniscient agent scores ~0.78 due to unavoidable SLA breaches
 
 ---
 
 ## Grading
 
-Each task uses a weighted composite grader:
+Each task uses a weighted composite grader. All scores are in [0.0, 1.0]:
 
 | Dimension | Description |
 |-----------|-------------|
 | Resolution rate | Fraction of tickets handled (resolved + escalated + merged) |
 | Prioritization | Kendall-tau ordering — were urgent tickets handled first? |
 | SLA compliance | 1 - (breaches / total tickets) |
-| Response quality | Keyword coverage + length + empathy + actionability |
+| Response quality | Keyword coverage + length + empathy + actionability + sentiment alignment |
 | Duplicate detection | F1 score of correct merges vs actual duplicates |
+| Classification accuracy | Correct dept routing for escalations + keyword quality for responses |
+| Critical coverage | Fraction of P0/P1 tickets handled before SLA breach |
 
-Weights vary by task (e.g., prioritization matters more in Peak Hours).
+Weights vary by task (see task JSON configs for exact weights).
 
 ---
 
@@ -125,8 +132,8 @@ Weights vary by task (e.g., prioritization matters more in Peak Hours).
 ### Docker (recommended)
 
 ```bash
-docker build -t csops .
-docker run -p 7860:7860 csops
+docker build -t supportbench .
+docker run -p 7860:7860 supportbench
 ```
 
 ### Local
@@ -145,15 +152,21 @@ curl http://localhost:7860/
 # List tasks
 curl http://localhost:7860/tasks
 
-# Reset with task
-curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d '{"task_id": "morning_shift"}'
+# Reset (empty body defaults to ticket_classification)
+curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d '{}'
+
+# Reset with specific task
+curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d '{"task": "full_resolution"}'
 
 # Take an action
 curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d '{
   "action_type": "respond",
   "ticket_id": "TKT-0001",
-  "response_text": "I apologize for the inconvenience. I have processed your refund."
+  "response_text": "I apologize for the inconvenience. I have processed your refund immediately."
 }'
+
+# Get current state
+curl http://localhost:7860/state
 
 # Get grade
 curl http://localhost:7860/grade
@@ -165,6 +178,7 @@ curl http://localhost:7860/grade
 export API_BASE_URL="https://api.openai.com/v1"
 export MODEL_NAME="gpt-4o-mini"
 export OPENAI_API_KEY="sk-..."
+export HF_TOKEN="$OPENAI_API_KEY"
 export ENV_URL="http://localhost:7860"
 
 python inference.py
@@ -172,34 +186,24 @@ python inference.py
 
 ---
 
-## Baseline Scores
-
-| Model | Morning Shift | Peak Hours | Outage Crisis | Average |
-|-------|:---:|:---:|:---:|:---:|
-| GPT-4o-mini | 0.52 | 0.31 | 0.18 | 0.34 |
-
-*Scores are deterministic given the same model and seed.*
-
----
-
 ## Project Structure
 
 ```
-├── openenv.yaml          # OpenEnv metadata
-├── inference.py           # Baseline inference script
-├── Dockerfile             # Container definition
-├── requirements.txt       # Python dependencies
+├── openenv.yaml          # OpenEnv metadata + action/observation schemas
+├── inference.py           # Baseline inference script ([START]/[STEP]/[END] logs)
+├── Dockerfile             # python:3.11-slim, port 7860
+├── requirements.txt       # fastapi, uvicorn, pydantic, httpx, openai, pyyaml
 ├── README.md              # This file
 └── server/
     ├── __init__.py
-    ├── app.py             # FastAPI endpoints
-    ├── environment.py     # Core state machine
-    ├── models.py          # Pydantic schemas
-    ├── tickets.py         # Ticket generation engine
+    ├── app.py             # FastAPI endpoints (/reset, /step, /state, /grade)
+    ├── environment.py     # Core state machine (CustomerSupportEnv)
+    ├── models.py          # Pydantic schemas (all typed)
+    ├── tickets.py         # Ticket generation engine (50+ templates)
     └── tasks/
-        ├── task1.json     # Morning Shift config
-        ├── task2.json     # Peak Hours config
-        └── task3.json     # Outage Crisis config
+        ├── task1.json     # ticket_classification (Easy)
+        ├── task2.json     # triage_prioritize (Medium)
+        └── task3.json     # full_resolution (Hard)
 ```
 
 ---
