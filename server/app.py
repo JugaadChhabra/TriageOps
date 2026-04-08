@@ -1,4 +1,4 @@
-"""FastAPI endpoints for the SupportBench environment."""
+"""FastAPI endpoints for the TriageOps environment."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ _load_tasks()
 # ── App Setup ──────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="SupportBench",
+    title="TriageOps",
     description="AI Customer Support Ops — RL Environment",
     version="1.0.0",
 )
@@ -50,7 +50,7 @@ class ResetRequest(BaseModel):
 @app.get("/")
 def root():
     return {
-        "name": "SupportBench",
+        "name": "TriageOps",
         "description": "AI Customer Support Ops RL Environment",
         "tasks": list(TASK_CONFIGS.keys()),
     }
@@ -64,7 +64,7 @@ def health():
 @app.get("/metadata")
 def metadata():
     return {
-        "name": "SupportBench",
+        "name": "TriageOps",
         "description": "AI Customer Support Ops — triage and resolve tickets under SLA pressure",
         "version": "1.0.0",
         "tasks": list(TASK_CONFIGS.keys()),
@@ -87,7 +87,7 @@ def mcp(body: dict = {}):
         "jsonrpc": "2.0",
         "id": body.get("id", 1),
         "result": {
-            "name": "SupportBench",
+            "name": "TriageOps",
             "version": "1.0.0",
         },
     }

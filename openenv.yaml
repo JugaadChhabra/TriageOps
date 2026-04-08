@@ -1,4 +1,4 @@
-name: supportbench
+name: triageops
 description: "AI Customer Support Ops — triage and resolve tickets under SLA pressure"
 version: "1.0.0"
 author: "TriageOps Team"

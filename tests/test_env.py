@@ -1,4 +1,4 @@
-"""Unit tests for the SupportBench environment."""
+"""Unit tests for the TriageOps environment."""
 import json
 import importlib
 from pathlib import Path
@@ -254,7 +254,7 @@ class TestEndpoints:
 
     def test_metadata(self):
         r = self._client().get("/metadata")
-        assert r.json()["name"] == "SupportBench"
+        assert r.json()["name"] == "TriageOps"
 
     def test_schema_endpoint(self):
         d = self._client().get("/schema").json()

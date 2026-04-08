@@ -1,4 +1,4 @@
-"""Baseline inference agent for SupportBench.
+"""Baseline inference agent for TriageOps.
 
 Uses OpenAI-compatible API to triage and resolve customer support tickets.
 Produces structured [START]/[STEP]/[END] logs on stdout.
@@ -18,6 +18,9 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 HF_TOKEN = os.getenv("HF_TOKEN")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
+
+# Optional — if you use from_docker_image():
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 if HF_TOKEN is None:
     raise ValueError(
@@ -99,7 +102,7 @@ MAX_HISTORY = 6
 
 # ── Logging Functions ──────────────────────────────────────────────────────
 
-BENCHMARK = "supportbench"
+BENCHMARK = "triageops"
 SUCCESS_SCORE_THRESHOLD = 0.5
 
 
@@ -124,12 +127,14 @@ def log_step(
 def log_end(
     success: bool,
     steps: int,
+    score: float,
     rewards: list[float],
 ) -> None:
     """Emit [END] line in exact OpenEnv plain-text format. Always called, even on exception."""
     success_str = "true" if success else "false"
+    clamped_score = min(max(score, 0.0), 1.0)
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={success_str} steps={steps} rewards={rewards_str}", flush=True)
+    print(f"[END] success={success_str} steps={steps} score={clamped_score:.2f} rewards={rewards_str}", flush=True)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -366,8 +371,9 @@ def run_task(task_name: str, task_desc: str) -> dict:
 
     finally:
         # [END] is ALWAYS emitted, even on exception
-        success = grade.get("score", 0.0) >= SUCCESS_SCORE_THRESHOLD
-        log_end(success=success, steps=steps_taken, rewards=rewards)
+        final_score = min(max(grade.get("score", 0.0), 0.0), 1.0)
+        success = final_score >= SUCCESS_SCORE_THRESHOLD
+        log_end(success=success, steps=steps_taken, score=final_score, rewards=rewards)
 
     return grade
 

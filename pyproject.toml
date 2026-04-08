@@ -1,5 +1,5 @@
 [project]
-name = "supportbench"
+name = "triageops"
 version = "1.0.0"
 description = "AI Customer Support Ops — OpenEnv RL Environment"
 requires-python = ">=3.11"

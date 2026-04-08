@@ -1,31 +1,105 @@
-# AI Customer Support Ops — OpenEnv Environment
+---
+title: TriageOps
+emoji: 🎫
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+tags:
+  - openenv
+pinned: false
+---
 
-> **A multi-objective reinforcement learning environment that benchmarks AI agents on real-world customer support triage and resolution.**
+# TriageOps — AI Customer Support Ops
 
-Customer support teams process thousands of tickets daily under competing pressures: speed, quality, SLA compliance, and customer retention. This environment models that reality. An agent must classify incoming tickets, prioritize under capacity constraints, generate quality responses, detect duplicates, route escalations correctly, and manage crisis events — all while the clock ticks and SLAs expire.
+> **A multi-objective RL environment where AI agents triage and resolve customer support tickets under SLA pressure, capacity constraints, and competing priorities.**
+
+Customer support is a **$400B+ industry** where teams process thousands of tickets daily under impossible trade-offs: speed vs quality, enterprise vs free-tier, escalation vs resolution, individual tickets vs queue-wide strategy. This environment turns that into a benchmark.
+
+An agent sees a live ticket queue each step, must decide **which** tickets to act on, **how** to act (respond / escalate / defer / merge duplicates), and manage a finite action budget — while SLAs tick down, new tickets flood in, VIP customers demand attention, and departments go offline.
 
 ---
 
-## Why This Matters
+## Quick Start
 
-Customer support triage is a **multi-objective constrained decision problem**. You cannot maximize all objectives simultaneously:
+### 1. Deploy to Hugging Face Spaces
 
-- Responding faster means lower quality
-- Handling enterprise customers first means free-tier SLAs breach
-- Escalating everything avoids bad responses but overloads departments
-- Merging duplicates saves capacity but wrong merges lose tickets
+```bash
+# Clone and push to your HF Space
+git clone https://github.com/YOUR_USERNAME/TriageOps.git
+cd TriageOps
 
-This creates a realistic benchmark for evaluating AI agents on **planning under uncertainty**, **prioritization**, and **human-centric decision-making**.
+# Create HF Space (sdk: docker, tag: openenv)
+huggingface-cli repo create YOUR_SPACE_NAME --type space -y
+git remote add hf https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE_NAME
+git push hf main
+```
 
-### Domain Novelty
+Your Space must be **Running** before submission. The HF metadata block at the top of this README configures it as a Docker Space on port 7860 with the `openenv` tag.
 
-Existing OpenEnv environments focus on code generation, data processing, and structured tasks. **Customer support ops is underrepresented** despite being one of the highest-volume AI deployment domains. This environment fills that gap with:
+### 2. Run Locally with Docker
 
-- **Natural language understanding required** — the agent must infer ticket category and urgency from free-text descriptions, not metadata labels
-- **Multi-objective Pareto frontier** — no strategy can maximize all 7 grading dimensions simultaneously. Speed trades off with quality. Coverage trades off with prioritization. Escalation trades off with department capacity.
-- **Dynamic surprise mechanics** — VIP tickets (3x weight) appear unpredictably. Departments go offline mid-episode. Ticket bursts simulate real outage floods. Customer sentiment decays and triggers forced escalation at zero.
-- **Abusive/adversarial inputs** — templates include angry repeat callers, multi-issue tickets, and hostile language requiring de-escalation
-- **Realistic operational constraints** — limited actions per time step, department capacity limits, SLA clocks, and enterprise vs free-tier prioritization mirrors actual support queue dynamics
+```bash
+docker build -t triageops .
+docker run -p 7860:7860 triageops
+```
+
+### 3. Run Locally without Docker
+
+```bash
+pip install -r requirements.txt
+uvicorn server.app:app --host 0.0.0.0 --port 7860
+```
+
+### 4. Run the Inference Script
+
+```bash
+export API_BASE_URL="https://api.openai.com/v1"   # required, has default
+export MODEL_NAME="gpt-4o-mini"                    # required, has default
+export HF_TOKEN="your-api-key-here"                # MANDATORY — no default
+export ENV_URL="http://localhost:7860"              # where the env server runs
+
+python inference.py
+```
+
+`inference.py` uses the **OpenAI client** (`from openai import OpenAI`) with `HF_TOKEN` as the API key. It reads `API_BASE_URL` and `MODEL_NAME` from environment variables (both have defaults). `HF_TOKEN` is mandatory and will raise an error if not set.
+
+---
+
+## Validate Before Submitting
+
+### Pre-submission checklist
+
+```bash
+# 1. Docker builds
+docker build -t triageops .
+
+# 2. Server responds
+docker run -d -p 7860:7860 triageops
+curl -X POST http://localhost:7860/reset \
+  -H "Content-Type: application/json" -d '{}'
+# → 200 with JSON observation
+
+# 3. openenv validate passes
+pip install openenv-core
+openenv validate                              # static: checks Dockerfile, pyproject.toml, openenv.yaml
+openenv validate --url http://localhost:7860   # runtime: checks /health, /metadata, /schema, /mcp, /reset, /step, /state
+
+# 4. Inference script runs (requires HF_TOKEN)
+export HF_TOKEN="your-key"
+export ENV_URL="http://localhost:7860"
+python inference.py
+# → emits [START], [STEP], [END] lines to stdout
+
+# 5. HF Space is in "Running" state (check before submitting!)
+```
+
+### Validation results
+
+```
+openenv validate → [OK] Ready for multi-mode deployment (docker, openenv_serve, uv_run, python_module)
+openenv validate --url → passed: true (6/6 criteria)
+```
 
 ---
 
@@ -34,14 +108,14 @@ Existing OpenEnv environments focus on code generation, data processing, and str
 ### Episode Loop
 
 ```
-reset(task) → initial observation
-  └─ for each step:
-       agent sees ticket queue + constraints
-       agent picks action (respond / escalate / defer / merge)
-       environment returns reward + updated observation
-       time advances: SLAs tick, new tickets arrive, sentiment decays
-  └─ episode ends: time limit, all resolved, or catastrophic breach
-grade() → final score 0.0–1.0
+POST /reset → initial observation (ticket queue)
+  └─ for each time step:
+       agent sees: ticket queue + SLA warnings + dept status + capacity remaining
+       agent sends: POST /step with action (respond/escalate/defer/merge)
+       env returns: reward + updated observation + done flag
+       world advances: SLAs tick, sentiment decays, new tickets arrive, bursts fire
+  └─ episode ends when: time limit hit, all tickets resolved, or breach threshold exceeded
+GET /grade → final score 0.0–1.0
 ```
 
 ### Architecture
@@ -66,7 +140,7 @@ grade() → final score 0.0–1.0
 │  │ Ticket  │   │   Rewards    │   │   World Clock        │ │
 │  │  Queue  │──▶│  per-action  │   │  SLA ticks           │ │
 │  │         │   │  per-step    │   │  sentiment decays    │ │
-│  │ 50+ tpl │   │  end-bonus   │   │  arrivals (Poisson)  │ │
+│  │ 53 tpl  │   │  end-bonus   │   │  arrivals (Poisson)  │ │
 │  └─────────┘   └──────────────┘   │  bursts (outage)     │ │
 │                                    │  dept outages        │ │
 │  ┌─────────┐   ┌──────────────┐   └──────────────────────┘ │
@@ -74,7 +148,7 @@ grade() → final score 0.0–1.0
 │  │Profiles │   │  resolution  │   ┌──────────────────────┐ │
 │  │tier/ltv │   │  priority    │   │  3 Tasks             │ │
 │  │churn    │   │  SLA         │   │  easy → med → hard   │ │
-│  │VIP flag │   │  quality     │   │  10 → 20 → 30+ tix  │ │
+│  │VIP flag │   │  quality     │   │  10 → 20 → 50+ tix  │ │
 │  └─────────┘   │  duplicates  │   └──────────────────────┘ │
 │                │  classific.  │                             │
 │                │  critical    │                             │
@@ -82,123 +156,180 @@ grade() → final score 0.0–1.0
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Observation Space
+---
+
+## Observation Space
+
+Each step, the agent sees a `QueueObservation`:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `tickets` | `List[TicketView]` | Open tickets with subject, description, sentiment, SLA, customer info |
+| `tickets` | `List[TicketView]` | Open tickets — subject, description, sentiment, SLA, tier, VIP flag, prior interactions |
 | `current_step` | `int` | Current time step |
 | `max_steps` | `int` | Total episode length |
-| `actions_this_step` | `int` | Actions taken this step |
-| `capacity_per_step` | `int` | Max actions per step |
-| `department_status` | `List[DepartmentStatus]` | Department backlog and availability |
-| `sla_warnings` | `List[str]` | Ticket IDs with SLA ≤ 2 steps |
+| `actions_this_step` | `int` | Actions already taken this step |
+| `capacity_per_step` | `int` | Max actions allowed per step |
+| `department_status` | `List[DepartmentStatus]` | Each dept's queue size + whether it's accepting escalations |
+| `sla_warnings` | `List[str]` | Ticket IDs with SLA <= 2 steps remaining |
 | `total_reward` | `float` | Cumulative raw reward |
 | `normalized_reward` | `float` | Reward normalized to 0.0–1.0 |
 | `tickets_resolved` | `int` | Total resolved so far |
 | `tickets_breached` | `int` | Total SLA breaches |
 | `tickets_escalated` | `int` | Total escalated |
 
-**Note:** The agent does NOT see ground-truth category or urgency labels. It must infer these from the ticket description text.
+**The agent does NOT see ground-truth category or urgency.** It must infer these from the ticket description text.
 
-### Action Space
+## Action Space
+
+Send a `SupportAction` JSON to `POST /step`:
 
 | Action | Required Fields | Description |
 |--------|----------------|-------------|
-| `respond` | `ticket_id`, `response_text` | Resolve a ticket with a written response |
-| `escalate` | `ticket_id`, `target_department` | Route to: billing, engineering, security, account_management, general_support |
-| `defer` | `ticket_id` | Skip this ticket to handle higher-priority ones |
-| `merge` | `ticket_id`, `merge_with_id` | Merge a duplicate into another ticket |
+| `respond` | `ticket_id`, `response_text` | Resolve with a written response |
+| `escalate` | `ticket_id`, `target_department` | Route to: `billing`, `engineering`, `security`, `account_management`, `general_support` |
+| `defer` | `ticket_id` | Skip now, handle later (only smart if higher-priority tickets exist) |
+| `merge` | `ticket_id`, `merge_with_id` | Merge a duplicate into another active ticket |
 
-### Reward Design
+**Example action:**
+```json
+{
+  "action_type": "respond",
+  "ticket_id": "TKT-0001",
+  "response_text": "I sincerely apologize for the inconvenience. I have processed your refund immediately and will follow up."
+}
+```
 
-**Per-action (dense):**
-- Resolve: `base × quality × urgency_mult × tier_mult + speed_bonus` (0.3–8.0)
-- Correct escalation: +0.5 + speed bonus
-- Good merge (actual duplicate): +0.3
-- Smart defer (SLA has room): +0.1
-- Wrong department: -0.3
-- Empty close (< 10 chars): -0.4
-- Repeat action on same ticket: -0.3
-- Invalid action: -0.2
+---
 
-**Per-step (continuous pressure):**
-- Critical ticket ignored (P0/P1 still OPEN): -0.15 × urgency multiplier
-- Sentiment decay: -0.05 per waiting ticket per step
-- SLA breach: -1.0 × urgency multiplier + -0.5 forced-escalation penalty
+## Reward Design
 
-**Episode bonuses:**
-- Zero breaches: +2.0
-- All enterprise SLAs met: +1.5
-- High resolution ratio: up to +1.5
+### Per-action (dense signal)
+| Action | Reward |
+|--------|--------|
+| Resolve ticket | `base × quality × urgency_mult × tier_mult × vip_mult + speed_bonus` (0.3–8+) |
+| Correct escalation | +0.5 + speed bonus |
+| Merge actual duplicate | +0.3 |
+| Smart defer (SLA has room) | +0.1 |
+| Wrong department | -0.3 |
+| Empty close (< 10 chars) | -0.4 |
+| Repeat same action on ticket | -0.3 |
+| Invalid action | -0.2 |
+| Escalate to overloaded/offline dept | -0.4 |
+
+### Per-step (continuous pressure)
+- P0/P1 ticket ignored (still OPEN): **-0.15 × urgency_mult** per step
+- Sentiment decay: **-0.05/step** (1.5x for VIP, 2x for abusive tickets)
+- Sentiment hits 0 (customer meltdown): **-1.5 × urgency_mult** and ticket auto-breaches
+- SLA breach: **-1.0 × urgency_mult + -0.5** forced-escalation penalty
+
+### Episode bonuses
+- Zero breaches: **+2.0**
+- All enterprise SLAs met: **+1.5**
+- High resolution ratio: **up to +1.5**
+
+### Why you can't maximize everything
+- **Speed vs Quality:** Responding fast to hit SLAs means less thoughtful responses (lower quality score)
+- **Coverage vs Prioritization:** Handling tickets in queue order maximizes throughput but ignores urgency ranking
+- **Escalation vs Capacity:** Routing to the right department is correct, but departments have capacity limits and can go offline
+- **Individual vs Batch:** Responding to 10 outage duplicates individually wastes 9 action slots; merging them saves capacity but requires recognition
 
 ---
 
 ## Tasks
 
 ### Task 1: Ticket Classification (Easy)
-- **Scenario:** 10 clear-cut tickets, no new arrivals, generous SLAs (10–20 steps), unlimited capacity
-- **Tests:** Correct department routing, category-appropriate responses
-- **Grader emphasis:** Classification accuracy (50%), resolution rate (30%)
-- **Threshold:** 0.8+ for success
+
+| Parameter | Value |
+|-----------|-------|
+| Tickets | 10 (no new arrivals) |
+| Capacity | 10 actions/step (unlimited) |
+| SLAs | Generous: P0=10, P1=12, P2=15, P3=20 steps |
+| Steps | 15 |
+| Focus | Can the agent correctly classify and route tickets? |
+| Grader weights | Classification accuracy 50%, Resolution rate 30%, SLA 10%, Quality 10% |
+| Target score | 0.80+ |
 
 ### Task 2: Triage & Prioritize (Medium)
-- **Scenario:** 20 mixed-urgency tickets, 5 actions/step × 4 steps = exactly 20 slots, no arrivals
-- **Tests:** Urgency-appropriate ordering, critical ticket coverage, no P0/P1 left unhandled
-- **Grader emphasis:** Prioritization (30%), critical coverage (30%)
-- **Challenge:** Tight SLAs mean P0 tickets breach in 2 steps if ignored
+
+| Parameter | Value |
+|-----------|-------|
+| Tickets | 20 (no new arrivals) |
+| Capacity | 5 actions/step × 4 steps = exactly 20 slots |
+| SLAs | Tight: P0=2, P1=3, P2=5, P3=8 steps |
+| Steps | 4 |
+| Focus | Handle P0/P1 first or they breach. Every action matters. |
+| Grader weights | Prioritization 30%, Critical coverage 30%, Resolution 15%, SLA 15%, Classification 10% |
+| Challenge | P0 tickets breach in 2 steps — must be handled immediately |
 
 ### Task 3: Full Resolution Pipeline (Hard)
-- **Scenario:** 20 initial + Poisson arrivals (rate 3.0) + 2 burst events (step 2: 8 tickets, step 5: 12 tickets) = 50+ total
-- **Capacity:** 5 actions/step × 10 steps = 50 slots (barely enough)
-- **Tests:** Classification, prioritization, response quality, duplicate detection, escalation routing — all simultaneously
-- **Grader emphasis:** All 7 dimensions weighted equally (15% each + 10% critical coverage)
-- **Challenge:** Even an omniscient agent scores ~0.78 due to unavoidable SLA breaches
+
+| Parameter | Value |
+|-----------|-------|
+| Tickets | 20 initial + Poisson arrivals (rate 3.0) + 2 bursts = **50+ total** |
+| Capacity | 5 actions/step × 10 steps = 50 slots (barely enough) |
+| SLAs | Very tight: P0=2, P1=3, P2=5, P3=8 steps |
+| Bursts | Step 2: 8 tickets (50% duplicates) / Step 5: 12 tickets (60% duplicates) |
+| Surprises | VIP tickets (15%, 3x weight), Engineering dept goes offline at step 4 |
+| Dept capacity | 6 tickets per department before overload |
+| Grader weights | All 7 dimensions: 15% each + critical coverage 10% |
+| Challenge | Even an omniscient agent scores ~0.78 — breaches are unavoidable |
 
 ---
 
 ## Grading
 
-Each task uses a weighted composite grader. All scores are in [0.0, 1.0]:
+7 deterministic grading components, all in [0.0, 1.0]:
 
-| Dimension | Description |
-|-----------|-------------|
-| Resolution rate | Fraction of tickets handled (resolved + escalated + merged) |
-| Prioritization | Kendall-tau ordering — were urgent tickets handled first? |
-| SLA compliance | 1 - (breaches / total tickets) |
-| Response quality | Keyword coverage + length + empathy + actionability + sentiment alignment |
-| Duplicate detection | F1 score of correct merges vs actual duplicates |
-| Classification accuracy | Correct dept routing for escalations + keyword quality for responses |
-| Critical coverage | Fraction of P0/P1 tickets handled before SLA breach |
+| Dimension | How it's measured |
+|-----------|-------------------|
+| **Resolution rate** | tickets handled / total tickets |
+| **Prioritization** | Kendall-tau rank correlation vs ideal urgency order |
+| **SLA compliance** | 1 - (breaches / total tickets) |
+| **Response quality** | Keyword coverage (with synonym expansion) + empathy + actionability + sentiment alignment |
+| **Duplicate detection** | F1 score: correct merges vs actual duplicates |
+| **Classification accuracy** | Correct department routing + keyword relevance for responses |
+| **Critical coverage** | P0/P1 tickets resolved before SLA breach |
 
-Weights vary by task (see task JSON configs for exact weights).
+Final score = weighted sum of components (weights vary by task). Same actions always produce the same score (seeded RNG + deterministic graders).
 
 ---
 
-## Setup & Usage
+## Inference Script Output Format
 
-### Docker (recommended)
+`inference.py` emits exactly three line types to stdout:
 
-```bash
-docker build -t supportbench .
-docker run -p 7860:7860 supportbench
+```
+[START] task=ticket_classification env=triageops model=gpt-4o-mini
+[STEP] step=0 action={"action_type":"respond","ticket_id":"TKT-0001","response_text":"..."} reward=4.96 done=false error=null
+[STEP] step=1 action={"action_type":"escalate","ticket_id":"TKT-0002","target_department":"billing"} reward=0.50 done=false error=null
+...
+[END] success=true steps=10 rewards=4.96,0.50,3.20,1.10,0.80,0.60,0.55,0.40,0.30,0.20
 ```
 
-### Local
+Rules:
+- One `[START]` at episode begin
+- One `[STEP]` per step, immediately after `env.step()` returns
+- One `[END]` after episode ends — **always emitted**, even on exception (try/finally)
+- `reward` formatted to 2 decimal places
+- `done` and `success` are lowercase: `true` or `false`
+- `error` is the error string or `null`
+- All on single lines, no newlines within a line
 
-```bash
-pip install -r requirements.txt
-uvicorn server.app:app --host 0.0.0.0 --port 7860
-```
+---
 
-### Test endpoints
+## Test Endpoints
 
 ```bash
 # Health check
-curl http://localhost:7860/
+curl http://localhost:7860/health
+# → {"status": "healthy"}
 
-# List tasks
-curl http://localhost:7860/tasks
+# Metadata
+curl http://localhost:7860/metadata
+# → {"name": "TriageOps", "description": "...", "version": "1.0.0", "tasks": [...]}
+
+# Schema (action/observation/state)
+curl http://localhost:7860/schema
 
 # Reset (empty body defaults to ticket_classification)
 curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d '{}'
@@ -220,31 +351,17 @@ curl http://localhost:7860/state
 curl http://localhost:7860/grade
 ```
 
-### Run inference
-
-```bash
-export API_BASE_URL="https://api.openai.com/v1"
-export MODEL_NAME="gpt-4o-mini"
-export OPENAI_API_KEY="sk-..."
-export HF_TOKEN="$OPENAI_API_KEY"
-export ENV_URL="http://localhost:7860"
-
-python inference.py
-```
-
 ---
 
 ## Baseline Scores
 
-Scores from the fallback agent (no LLM, deterministic heuristic that responds to tickets in queue order):
+Fallback agent (no LLM, responds to tickets in SLA order with template responses):
 
-| Model | Ticket Classification | Triage & Prioritize | Full Resolution | Average |
+| Model | Classification | Triage | Full Resolution | Average |
 |-------|:---:|:---:|:---:|:---:|
-| Fallback (no LLM) | 0.97 | 0.98 | 0.71 | 0.89 |
+| Fallback (no LLM) | 0.97 | 0.98 | 0.70 | 0.88 |
 
-The fallback agent achieves high scores on easy/medium tasks by simply responding to tickets in SLA order, but struggles on the hard task where duplicate detection, strategic escalation, and classification accuracy all matter.
-
-**Expected LLM agent scores** (with proper routing and response quality):
+Expected LLM scores (with proper routing, response quality, and duplicate detection):
 
 | Task | Frontier (GPT-4o) | Mid-tier (GPT-4o-mini) |
 |------|:---:|:---:|
@@ -256,19 +373,25 @@ The fallback agent achieves high scores on easy/medium tasks by simply respondin
 
 ---
 
-## Validation
+## Why This Matters
 
-This environment passes both static and runtime `openenv validate`:
+### Domain Novelty
 
-```bash
-# Static validation (checks pyproject.toml, Dockerfile, openenv.yaml, entry points)
-openenv validate
-# → [OK] TriageOps: Ready for multi-mode deployment (docker, openenv_serve, uv_run, python_module)
+OpenEnv environments focus on code, data, and structured tasks. **Customer support ops is underrepresented** despite being one of the highest-volume AI deployment domains. This environment fills that gap:
 
-# Runtime validation (checks /health, /metadata, /schema, /mcp, /reset, /step, /state)
-openenv validate --url http://localhost:7860
-# → passed: true (6/6 criteria)
-```
+- **Natural language understanding** — agent infers ticket category and urgency from free text, not labels
+- **Multi-objective Pareto frontier** — no strategy maximizes all 7 grading dimensions. Speed vs quality. Coverage vs prioritization. Escalation vs department capacity.
+- **Dynamic surprises** — VIP tickets (3x weight), department outages mid-episode, ticket bursts simulating outage floods, customer sentiment meltdowns
+- **Adversarial inputs** — abusive customers, repeat callers, multi-issue tickets requiring decomposition
+- **Real operational constraints** — capacity limits, department backlogs, SLA clocks, enterprise vs free-tier priority mirrors actual Zendesk/Freshdesk dynamics
+
+### Connection to RL Research
+
+This environment is a constrained multi-objective MDP with:
+- **Partial observability** — ground-truth labels hidden, agent must infer from text
+- **Stochastic transitions** — Poisson arrivals, burst events, sentiment dynamics
+- **Competing reward signals** — dense per-action + continuous per-step pressure + episode bonuses
+- **Planning horizon matters** — easy task is reactive, medium is tactical, hard requires strategic anticipation
 
 ---
 
@@ -276,22 +399,37 @@ openenv validate --url http://localhost:7860
 
 ```
 ├── openenv.yaml          # OpenEnv metadata + action/observation schemas
-├── pyproject.toml         # Python project config (enables openenv_serve, uv_run)
-├── inference.py           # Baseline inference script ([START]/[STEP]/[END] logs)
-├── Dockerfile             # python:3.11-slim, port 7860
+├── pyproject.toml         # Python project config (openenv_serve, uv_run support)
+├── inference.py           # Baseline inference script ([START]/[STEP]/[END] format)
+├── Dockerfile             # python:3.11-slim, port 7860, uvicorn
+├── .dockerignore          # Excludes venv, .git, __pycache__
 ├── requirements.txt       # fastapi, uvicorn, pydantic, httpx, openai, pyyaml
-├── README.md              # This file
-└── server/
+├── README.md              # This file (also HF Space metadata)
+├── uv.lock                # Lockfile for uv_run deployment
+├── server/
+│   ├── __init__.py
+│   ├── app.py             # FastAPI: /reset, /step, /state, /grade, /health, /metadata, /schema, /mcp
+│   ├── environment.py     # Core state machine (CustomerSupportEnv)
+│   ├── models.py          # Pydantic schemas (all typed with Field descriptions)
+│   ├── tickets.py         # Ticket generation engine (53 templates, 8 categories)
+│   └── tasks/
+│       ├── task1.json     # ticket_classification (Easy)
+│       ├── task2.json     # triage_prioritize (Medium)
+│       └── task3.json     # full_resolution (Hard)
+└── tests/
     ├── __init__.py
-    ├── app.py             # FastAPI endpoints (/reset, /step, /state, /grade, /health, /metadata, /schema, /mcp)
-    ├── environment.py     # Core state machine (CustomerSupportEnv)
-    ├── models.py          # Pydantic schemas (all typed)
-    ├── tickets.py         # Ticket generation engine (50+ templates)
-    └── tasks/
-        ├── task1.json     # ticket_classification (Easy)
-        ├── task2.json     # triage_prioritize (Medium)
-        └── task3.json     # full_resolution (Hard)
+    └── test_env.py        # 31 unit tests (pytest)
 ```
+
+---
+
+## Hardware Requirements
+
+Runs within hackathon constraints:
+- **2 vCPU / 8 GB RAM** — no heavy models, no compilation-required deps
+- **Base image:** `python:3.11-slim`
+- **Inference runtime:** < 5 minutes for all 3 tasks (well under 20-minute limit)
+- **Memory footprint:** < 200 MB (ticket data is lightweight)
 
 ---
 
