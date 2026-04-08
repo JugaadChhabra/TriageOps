@@ -78,65 +78,54 @@ Merge the newer ticket into the older one."""
 
 # ── Logging Functions ──────────────────────────────────────────────────────
 
+BENCHMARK = "supportbench"
+SUCCESS_SCORE_THRESHOLD = 0.5
 
-def log_start(task_name: str, task_description: str) -> None:
-    """Emit [START] log line."""
+
+def log_start(task: str, env: str, model: str) -> None:
+    """Emit [START] log line matching OpenEnv sample format."""
     print(json.dumps({
         "type": "[START]",
-        "task": task_name,
-        "description": task_description,
-        "model": MODEL_NAME,
+        "task": task,
+        "env": env,
+        "model": model,
         "timestamp": time.time(),
-    }))
-    sys.stdout.flush()
+    }), flush=True)
 
 
 def log_step(
     step: int,
-    action_type: str,
-    ticket_id: str,
+    action: str,
     reward: float,
-    cumulative_reward: float,
-    tickets_remaining: int,
     done: bool,
     error: str | None = None,
 ) -> None:
-    """Emit [STEP] log line."""
-    entry = {
+    """Emit [STEP] log line matching OpenEnv sample format."""
+    print(json.dumps({
         "type": "[STEP]",
         "step": step,
-        "action": action_type,
-        "ticket_id": ticket_id,
+        "action": action,
         "reward": reward,
-        "cumulative_reward": round(cumulative_reward, 4),
-        "tickets_remaining": tickets_remaining,
         "done": done,
-    }
-    if error:
-        entry["error"] = error
-    print(json.dumps(entry))
-    sys.stdout.flush()
+        "error": error,
+    }), flush=True)
 
 
 def log_end(
-    task_name: str,
+    success: bool,
+    steps: int,
     score: float,
-    breakdown: dict,
-    total_reward: float,
-    total_steps: int,
+    rewards: list[float],
 ) -> None:
-    """Emit [END] log line. Score is clamped to [0.0, 1.0]."""
-    clamped_score = min(max(score, 0.0), 1.0)
+    """Emit [END] log line matching OpenEnv sample format. Score clamped to [0.0, 1.0]."""
     print(json.dumps({
         "type": "[END]",
-        "task": task_name,
-        "score": clamped_score,
-        "breakdown": breakdown,
-        "total_reward": round(total_reward, 4),
-        "total_steps": total_steps,
+        "success": success,
+        "steps": steps,
+        "score": min(max(score, 0.0), 1.0),
+        "rewards": [round(r, 4) for r in rewards],
         "timestamp": time.time(),
-    }))
-    sys.stdout.flush()
+    }), flush=True)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -278,14 +267,14 @@ def clean_action(action: dict) -> dict:
 
 def run_task(task_name: str, task_desc: str) -> dict:
     """Run a single task and return the grade."""
-    log_start(task_name, task_desc)
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
     # Reset environment
     result = env_request("POST", "/reset", {"task": task_name})
     observation = result["observation"]
     done = result["done"]
-    total_steps = 0
-    total_reward = 0.0
+    steps_taken = 0
+    rewards: list[float] = []
 
     while not done:
         tickets = observation.get("tickets", [])
@@ -294,7 +283,7 @@ def run_task(task_name: str, task_desc: str) -> dict:
             result = env_request("POST", "/advance_step")
             observation = result["observation"]
             done = result["done"]
-            total_steps += 1
+            steps_taken += 1
             continue
 
         user_prompt = build_user_prompt(observation)
@@ -330,47 +319,37 @@ def run_task(task_name: str, task_desc: str) -> dict:
             action = make_fallback_action(tickets[0])
             action = clean_action(action)
 
+        # Build action description string for log
+        action_str = json.dumps(action, separators=(",", ":"))
+
         # Submit action
         try:
             result = env_request("POST", "/step", action)
         except Exception as e:
-            log_step(
-                step=total_steps, action_type=action["action_type"],
-                ticket_id=action["ticket_id"], reward=0.0,
-                cumulative_reward=total_reward, tickets_remaining=len(tickets),
-                done=False, error=str(e),
-            )
+            log_step(step=steps_taken, action=action_str, reward=0.0, done=False, error=str(e))
             break
 
         reward = result.get("reward", 0.0)
-        total_reward += reward
+        rewards.append(reward)
         observation = result["observation"]
         done = result["done"]
 
         log_step(
-            step=total_steps,
-            action_type=action["action_type"],
-            ticket_id=action["ticket_id"],
+            step=steps_taken,
+            action=action_str,
             reward=reward,
-            cumulative_reward=total_reward,
-            tickets_remaining=len(observation.get("tickets", [])),
             done=done,
             error=error_msg,
         )
-        total_steps += 1
+        steps_taken += 1
 
     # Get final grade
     grade = env_request("GET", "/grade")
     score = min(max(grade.get("score", 0.0), 0.0), 1.0)
     grade["score"] = score
+    success = score >= SUCCESS_SCORE_THRESHOLD
 
-    log_end(
-        task_name=task_name,
-        score=score,
-        breakdown=grade.get("breakdown", {}),
-        total_reward=total_reward,
-        total_steps=total_steps,
-    )
+    log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return grade
 

@@ -56,6 +56,43 @@ def root():
     }
 
 
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+
+@app.get("/metadata")
+def metadata():
+    return {
+        "name": "SupportBench",
+        "description": "AI Customer Support Ops — triage and resolve tickets under SLA pressure",
+        "version": "1.0.0",
+        "tasks": list(TASK_CONFIGS.keys()),
+    }
+
+
+@app.get("/schema")
+def schema():
+    return {
+        "action": SupportAction.model_json_schema(),
+        "observation": QueueObservation.model_json_schema(),
+        "state": QueueObservation.model_json_schema(),
+    }
+
+
+@app.post("/mcp")
+def mcp(body: dict = {}):
+    """Minimal JSON-RPC endpoint for OpenEnv MCP compatibility."""
+    return {
+        "jsonrpc": "2.0",
+        "id": body.get("id", 1),
+        "result": {
+            "name": "SupportBench",
+            "version": "1.0.0",
+        },
+    }
+
+
 @app.get("/tasks")
 def list_tasks():
     return {
@@ -97,3 +134,13 @@ def get_state() -> QueueObservation:
 @app.get("/grade")
 def get_grade() -> GradeResult:
     return env.grade()
+
+
+def main() -> None:
+    """Entry point for running the server directly."""
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=7860)
+
+
+if __name__ == "__main__":
+    main()

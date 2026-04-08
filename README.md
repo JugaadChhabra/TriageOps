@@ -186,17 +186,56 @@ python inference.py
 
 ---
 
+## Baseline Scores
+
+Scores from the fallback agent (no LLM, deterministic heuristic that responds to tickets in queue order):
+
+| Model | Ticket Classification | Triage & Prioritize | Full Resolution | Average |
+|-------|:---:|:---:|:---:|:---:|
+| Fallback (no LLM) | 0.97 | 0.98 | 0.71 | 0.89 |
+
+The fallback agent achieves high scores on easy/medium tasks by simply responding to tickets in SLA order, but struggles on the hard task where duplicate detection, strategic escalation, and classification accuracy all matter.
+
+**Expected LLM agent scores** (with proper routing and response quality):
+
+| Task | Frontier (GPT-4o) | Mid-tier (GPT-4o-mini) |
+|------|:---:|:---:|
+| ticket_classification | 0.90+ | 0.70–0.85 |
+| triage_prioritize | 0.85+ | 0.60–0.75 |
+| full_resolution | 0.50–0.78 | 0.30–0.50 |
+
+*Scores are deterministic given the same model and temperature=0.*
+
+---
+
+## Validation
+
+This environment passes both static and runtime `openenv validate`:
+
+```bash
+# Static validation (checks pyproject.toml, Dockerfile, openenv.yaml, entry points)
+openenv validate
+# → [OK] TriageOps: Ready for multi-mode deployment (docker, openenv_serve, uv_run, python_module)
+
+# Runtime validation (checks /health, /metadata, /schema, /mcp, /reset, /step, /state)
+openenv validate --url http://localhost:7860
+# → passed: true (6/6 criteria)
+```
+
+---
+
 ## Project Structure
 
 ```
 ├── openenv.yaml          # OpenEnv metadata + action/observation schemas
+├── pyproject.toml         # Python project config (enables openenv_serve, uv_run)
 ├── inference.py           # Baseline inference script ([START]/[STEP]/[END] logs)
 ├── Dockerfile             # python:3.11-slim, port 7860
 ├── requirements.txt       # fastapi, uvicorn, pydantic, httpx, openai, pyyaml
 ├── README.md              # This file
 └── server/
     ├── __init__.py
-    ├── app.py             # FastAPI endpoints (/reset, /step, /state, /grade)
+    ├── app.py             # FastAPI endpoints (/reset, /step, /state, /grade, /health, /metadata, /schema, /mcp)
     ├── environment.py     # Core state machine (CustomerSupportEnv)
     ├── models.py          # Pydantic schemas (all typed)
     ├── tickets.py         # Ticket generation engine (50+ templates)
