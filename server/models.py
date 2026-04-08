@@ -139,6 +139,7 @@ class QueueObservation(BaseModel):
     department_status: list[DepartmentStatus] = Field(default_factory=list)
     sla_warnings: list[str] = Field(default_factory=list, description="Tickets close to SLA breach")
     total_reward: float = Field(default=0.0, description="Cumulative reward so far")
+    normalized_reward: float = Field(default=0.0, description="Reward normalized to 0.0-1.0 range")
     tickets_resolved: int = Field(default=0)
     tickets_breached: int = Field(default=0)
     tickets_escalated: int = Field(default=0)

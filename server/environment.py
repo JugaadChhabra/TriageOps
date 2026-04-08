@@ -21,6 +21,7 @@ from .tickets import TicketGenerator
 
 # ── Reward Constants ───────────────────────────────────────────────────────
 
+# Tiered action rewards (classification < prioritization < resolution)
 BASE_RESOLVE_REWARD = 1.0
 ESCALATE_CORRECT_REWARD = 0.5
 ESCALATE_WRONG_PENALTY = -0.3
@@ -28,6 +29,22 @@ MERGE_REWARD = 0.3
 DEFER_REWARD = 0.1
 INVALID_ACTION_PENALTY = -0.2
 BREACH_PENALTY = -1.0
+
+# Speed bonus: multiplier for responding quickly relative to SLA
+# speed_ratio = sla_remaining / sla_total; bonus = SPEED_BONUS_MAX * speed_ratio
+SPEED_BONUS_MAX = 0.5
+
+# Penalty for ignoring critical (P0/P1) tickets: applied per-step if critical sits untouched
+CRITICAL_IGNORE_PENALTY = -0.15
+
+# Penalty for repeat action on same ticket (loop detection)
+REPEAT_ACTION_PENALTY = -0.3
+
+# Penalty for closing without meaningful response
+EMPTY_CLOSE_PENALTY = -0.4
+
+# Penalty when a ticket breaches SLA while agent had capacity (forced escalation)
+BREACH_ESCALATION_PENALTY = -0.5
 
 URGENCY_MULT = {
     TicketUrgency.P0: 3.0,
@@ -45,6 +62,10 @@ SENTIMENT_DECAY = 0.05
 ZERO_BREACH_BONUS = 2.0
 ENTERPRISE_SLA_BONUS = 1.5
 MAX_RESOLUTION_BONUS = 1.5
+
+# Maximum theoretical raw reward per ticket (for normalization)
+# P0 enterprise perfect response: 1.0 * 1.0 * 3.0 * 2.5 + 0.5 speed = 8.0
+MAX_REWARD_PER_TICKET = 8.0
 
 # Empathy and actionability words for response quality scoring
 EMPATHY_WORDS = [
@@ -78,6 +99,9 @@ class CustomerSupportEnv:
         self._resolution_order: list[str] = []
         self._detected_duplicates: set[str] = set()
         self._actual_duplicates: set[str] = set()
+        self._action_history: dict[str, list[str]] = {}  # ticket_id → [action_types]
+        self._initial_sla: dict[str, int] = {}  # ticket_id → original SLA at creation
+        self._normalized_reward: float = 0.0
 
     def reset(self, config: TaskConfig) -> StepResult:
         """Initialize a new episode."""
@@ -97,11 +121,15 @@ class CustomerSupportEnv:
         self._resolution_order = []
         self._detected_duplicates = set()
         self._actual_duplicates = set()
+        self._action_history = {}
+        self._initial_sla = {}
+        self._normalized_reward = 0.0
 
         # Generate initial tickets
         initial = self.generator.generate_batch(config.initial_tickets, current_step=0)
         for t in initial:
             self.tickets[t.id] = t
+            self._initial_sla[t.id] = t.sla_remaining
             if t.duplicate_of is not None:
                 self._actual_duplicates.add(t.id)
 
@@ -119,6 +147,7 @@ class CustomerSupportEnv:
 
         reward, info = self._process_action(action)
         self.total_reward = round(self.total_reward + reward, 4)
+        self._update_normalized_reward()
         self.actions_this_step += 1
         self.action_log.append({
             "step": self.current_step,
@@ -196,6 +225,7 @@ class CustomerSupportEnv:
             "resolved": str(resolved_count),
             "breached": str(breached),
             "total_reward": str(round(self.total_reward, 4)),
+            "normalized_reward": str(self._normalized_reward),
         }
 
         return GradeResult(score=score, breakdown=breakdown, details=details)
@@ -210,6 +240,16 @@ class CustomerSupportEnv:
         if ticket.status in (TicketStatus.RESOLVED, TicketStatus.MERGED, TicketStatus.ESCALATED):
             return INVALID_ACTION_PENALTY, {"error": f"Ticket {action.ticket_id} already {ticket.status.value}"}
 
+        # Loop detection: penalize repeat identical action on same ticket
+        history = self._action_history.setdefault(action.ticket_id, [])
+        if action.action_type.value in history:
+            return REPEAT_ACTION_PENALTY, {
+                "error": f"Repeat {action.action_type.value} on {action.ticket_id}",
+                "penalty": "repeat_action",
+                "reward": REPEAT_ACTION_PENALTY,
+            }
+        history.append(action.action_type.value)
+
         if action.action_type == ActionType.RESPOND:
             return self._handle_respond(ticket, action)
         elif action.action_type == ActionType.ESCALATE:
@@ -223,12 +263,38 @@ class CustomerSupportEnv:
 
     def _handle_respond(self, ticket: Ticket, action: SupportAction) -> tuple[float, dict]:
         response_text = action.response_text or ""
+
+        # Penalty for closing without meaningful response
+        if len(response_text.strip()) < 10:
+            ticket.status = TicketStatus.RESOLVED
+            self._resolution_order.append(ticket.id)
+            self.resolved_tickets.append(ticket)
+            del self.tickets[ticket.id]
+            self._response_qualities.append(0.0)
+            return EMPTY_CLOSE_PENALTY, {
+                "action": "respond",
+                "ticket_id": ticket.id,
+                "quality": 0.0,
+                "penalty": "empty_close",
+                "reward": EMPTY_CLOSE_PENALTY,
+            }
+
         quality = self._evaluate_response_quality(response_text, ticket)
         self._response_qualities.append(quality)
 
         u_mult = URGENCY_MULT[ticket.urgency]
         t_mult = TIER_MULT[ticket.customer.tier.value]
-        reward = round(BASE_RESOLVE_REWARD * quality * u_mult * t_mult, 4)
+        base_reward = BASE_RESOLVE_REWARD * quality * u_mult * t_mult
+
+        # Speed bonus: decaying reward based on how quickly ticket is addressed
+        initial_sla = self._initial_sla.get(ticket.id, ticket.sla_remaining)
+        if initial_sla > 0:
+            speed_ratio = ticket.sla_remaining / initial_sla
+        else:
+            speed_ratio = 0.0
+        speed_bonus = SPEED_BONUS_MAX * speed_ratio * u_mult
+
+        reward = round(base_reward + speed_bonus, 4)
 
         ticket.status = TicketStatus.RESOLVED
         self._resolution_order.append(ticket.id)
@@ -239,6 +305,7 @@ class CustomerSupportEnv:
             "action": "respond",
             "ticket_id": ticket.id,
             "quality": round(quality, 4),
+            "speed_bonus": round(speed_bonus, 4),
             "reward": reward,
         }
 
@@ -248,10 +315,17 @@ class CustomerSupportEnv:
             return INVALID_ACTION_PENALTY, {"error": "Escalation requires target_department"}
 
         correct = target_dept == ticket.required_department
+        u_mult = URGENCY_MULT[ticket.urgency]
+
         if correct:
-            reward = ESCALATE_CORRECT_REWARD
+            # Speed bonus for quick correct escalation
+            initial_sla = self._initial_sla.get(ticket.id, ticket.sla_remaining)
+            speed_ratio = ticket.sla_remaining / initial_sla if initial_sla > 0 else 0.0
+            speed_bonus = round(SPEED_BONUS_MAX * 0.5 * speed_ratio * u_mult, 4)
+            reward = ESCALATE_CORRECT_REWARD + speed_bonus
         else:
             reward = ESCALATE_WRONG_PENALTY
+            speed_bonus = 0.0
 
         ticket.status = TicketStatus.ESCALATED
         self.department_queues[target_dept] = self.department_queues.get(target_dept, 0) + 1
@@ -264,6 +338,7 @@ class CustomerSupportEnv:
             "ticket_id": ticket.id,
             "target_department": target_dept.value,
             "correct_department": correct,
+            "speed_bonus": speed_bonus,
             "reward": round(reward, 4),
         }
 
@@ -324,7 +399,7 @@ class CustomerSupportEnv:
 
         response_lower = response.lower()
 
-        # Keyword coverage (50%)
+        # Keyword coverage (40%)
         keywords = ticket.resolution_keywords
         if keywords:
             matched = sum(1 for kw in keywords if kw.lower() in response_lower)
@@ -332,7 +407,7 @@ class CustomerSupportEnv:
         else:
             keyword_score = 0.5
 
-        # Length score (20%) — sweet spot 50-300 chars
+        # Length score (15%) — sweet spot 50-300 chars
         length = len(response)
         if length < 20:
             length_score = 0.1
@@ -353,13 +428,45 @@ class CustomerSupportEnv:
         action_count = sum(1 for p in ACTIONABILITY_PHRASES if p in response_lower)
         actionability_score = min(1.0, action_count / 2)
 
+        # Sentiment alignment (15%): low-sentiment tickets need more empathy,
+        # high-sentiment tickets need more actionability
+        if ticket.sentiment < 0.3:
+            # Angry customer — empathy matters more
+            sentiment_score = min(1.0, empathy_count / 1.5)
+        elif ticket.sentiment > 0.7:
+            # Happy customer — just be helpful and actionable
+            sentiment_score = min(1.0, action_count / 1.5)
+        else:
+            # Neutral — balanced response is fine
+            sentiment_score = min(1.0, (empathy_count + action_count) / 3)
+
         quality = (
-            0.50 * keyword_score
-            + 0.20 * length_score
+            0.40 * keyword_score
+            + 0.15 * length_score
             + 0.15 * empathy_score
             + 0.15 * actionability_score
+            + 0.15 * sentiment_score
         )
         return round(max(0.0, min(1.0, quality)), 4)
+
+    # ── Reward Normalization ───────────────────────────────────────────────
+
+    def _update_normalized_reward(self) -> None:
+        """Normalize cumulative reward to 0.0–1.0 based on theoretical max."""
+        if self.config is None:
+            self._normalized_reward = 0.0
+            return
+        total_possible = len(self.tickets) + len(self.resolved_tickets)
+        if total_possible == 0:
+            self._normalized_reward = 0.0
+            return
+        # Max possible = per-ticket max * count + end bonuses
+        max_raw = (total_possible * MAX_REWARD_PER_TICKET
+                   + ZERO_BREACH_BONUS + ENTERPRISE_SLA_BONUS + MAX_RESOLUTION_BONUS)
+        # Clamp to [0, 1] — negative rewards map to 0
+        self._normalized_reward = round(
+            max(0.0, min(1.0, self.total_reward / max_raw)), 4
+        )
 
     # ── Time & State Management ────────────────────────────────────────────
 
@@ -372,13 +479,24 @@ class CustomerSupportEnv:
             ticket.sla_remaining -= 1
             ticket.sentiment = round(max(0.0, ticket.sentiment - SENTIMENT_DECAY), 2)
 
+            # Critical-ignore penalty: P0/P1 tickets sitting untouched (still OPEN) lose reward
+            if (ticket.status == TicketStatus.OPEN
+                    and ticket.urgency in (TicketUrgency.P0, TicketUrgency.P1)):
+                ignore_penalty = round(CRITICAL_IGNORE_PENALTY * URGENCY_MULT[ticket.urgency], 4)
+                self.total_reward = round(self.total_reward + ignore_penalty, 4)
+
             # SLA breach
             if ticket.sla_remaining <= 0 and ticket.status not in (
-                TicketStatus.RESOLVED, TicketStatus.ESCALATED, TicketStatus.MERGED
+                TicketStatus.RESOLVED, TicketStatus.ESCALATED, TicketStatus.MERGED, TicketStatus.BREACHED
             ):
                 ticket.status = TicketStatus.BREACHED
+                # Base breach penalty
                 penalty = round(BREACH_PENALTY * URGENCY_MULT[ticket.urgency], 4)
+                # Extra penalty: breach-forced escalation (agent had capacity but ignored)
+                penalty += BREACH_ESCALATION_PENALTY
                 self.total_reward = round(self.total_reward + penalty, 4)
+
+        self._update_normalized_reward()
 
         # New arrivals via Poisson process
         if self.config and self.config.arrival_rate > 0 and self.generator:
@@ -387,6 +505,7 @@ class CustomerSupportEnv:
             )
             for t in arrivals:
                 self.tickets[t.id] = t
+                self._initial_sla[t.id] = t.sla_remaining
                 if t.duplicate_of is not None:
                     self._actual_duplicates.add(t.id)
 
@@ -397,6 +516,7 @@ class CustomerSupportEnv:
                     burst_tickets = self.generator.generate_burst(burst, current_step=self.current_step)
                     for t in burst_tickets:
                         self.tickets[t.id] = t
+                        self._initial_sla[t.id] = t.sla_remaining
                         if t.duplicate_of is not None:
                             self._actual_duplicates.add(t.id)
 
@@ -571,6 +691,7 @@ class CustomerSupportEnv:
             department_status=dept_status,
             sla_warnings=sla_warnings,
             total_reward=round(self.total_reward, 4),
+            normalized_reward=self._normalized_reward,
             tickets_resolved=len(self.resolved_tickets),
             tickets_breached=breached_count,
             tickets_escalated=escalated_count,
