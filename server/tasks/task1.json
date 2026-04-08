@@ -1,0 +1,20 @@
+{
+  "name": "morning_shift",
+  "description": "Easy: 10 tickets, no new arrivals, generous SLAs. A gentle warmup.",
+  "initial_tickets": 10,
+  "max_steps": 12,
+  "capacity_per_step": 4,
+  "arrival_rate": 0.0,
+  "breach_threshold": 5,
+  "sla_steps": {"p0": 4, "p1": 6, "p2": 10, "p3": 15},
+  "seed": 42,
+  "bursts": [],
+  "enable_duplicates": false,
+  "grader_weights": {
+    "resolution_rate": 0.30,
+    "prioritization": 0.20,
+    "sla_compliance": 0.25,
+    "response_quality": 0.15,
+    "duplicate_detection": 0.10
+  }
+}

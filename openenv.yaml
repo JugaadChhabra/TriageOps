@@ -1,0 +1,28 @@
+name: supportbench
+description: "AI Customer Support Ops — triage and resolve tickets under SLA pressure"
+version: "1.0.0"
+
+endpoints:
+  reset: POST /reset
+  step: POST /step
+  state: GET /state
+  grade: GET /grade
+
+tasks:
+  - name: morning_shift
+    description: "Easy: 10 tickets, no arrivals, generous SLAs"
+    config_path: server/tasks/task1.json
+  - name: peak_hours
+    description: "Medium: 15 tickets + Poisson arrivals + duplicates"
+    config_path: server/tasks/task2.json
+  - name: outage_crisis
+    description: "Hard: burst at step 3, duplicate floods, enterprise churn"
+    config_path: server/tasks/task3.json
+
+models:
+  - server.models
+
+tags:
+  - openenv
+  - reinforcement-learning
+  - customer-support
