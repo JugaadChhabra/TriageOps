@@ -1,20 +1,22 @@
 {
-  "name": "peak_hours",
-  "description": "Medium: 15 initial tickets with Poisson arrivals and potential duplicates.",
-  "initial_tickets": 15,
-  "max_steps": 15,
+  "name": "triage_prioritize",
+  "description": "Medium — Triage 20 mixed-urgency tickets with limited capacity (5 per step, 4 steps = 20 slots). Must handle P0/P1 tickets first; no critical ticket left unhandled. Grader: weighted prioritization + critical coverage.",
+  "initial_tickets": 20,
+  "max_steps": 4,
   "capacity_per_step": 5,
-  "arrival_rate": 1.5,
-  "breach_threshold": 6,
-  "sla_steps": {"p0": 3, "p1": 5, "p2": 8, "p3": 12},
-  "seed": 123,
+  "arrival_rate": 0.0,
+  "breach_threshold": 10,
+  "sla_steps": {"p0": 2, "p1": 3, "p2": 5, "p3": 8},
+  "seed": 256,
   "bursts": [],
-  "enable_duplicates": true,
+  "enable_duplicates": false,
   "grader_weights": {
-    "resolution_rate": 0.25,
-    "prioritization": 0.20,
-    "sla_compliance": 0.25,
-    "response_quality": 0.15,
-    "duplicate_detection": 0.15
+    "prioritization": 0.30,
+    "critical_coverage": 0.30,
+    "resolution_rate": 0.15,
+    "sla_compliance": 0.15,
+    "classification_accuracy": 0.10,
+    "response_quality": 0.0,
+    "duplicate_detection": 0.0
   }
 }

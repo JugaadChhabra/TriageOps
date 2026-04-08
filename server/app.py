@@ -66,7 +66,7 @@ def list_tasks():
 
 @app.post("/reset")
 def reset(request: ResetRequest = ResetRequest()) -> StepResult:
-    task_name = request.task or "morning_shift"
+    task_name = request.task or "ticket_classification"
     if task_name not in TASK_CONFIGS:
         raise HTTPException(status_code=404, detail=f"Task '{task_name}' not found. Available: {list(TASK_CONFIGS.keys())}")
     config = TASK_CONFIGS[task_name]

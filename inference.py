@@ -22,9 +22,9 @@ ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860")
 client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
 TASKS = [
-    {"name": "morning_shift", "description": "Easy: 10 tickets, no arrivals"},
-    {"name": "peak_hours", "description": "Medium: 15 tickets + arrivals + duplicates"},
-    {"name": "outage_crisis", "description": "Hard: burst + duplicate floods + enterprise churn"},
+    {"name": "ticket_classification", "description": "Easy: classify 10 tickets into correct departments"},
+    {"name": "triage_prioritize", "description": "Medium: triage 20 tickets with limited capacity, P0/P1 first"},
+    {"name": "full_resolution", "description": "Hard: 30+ streaming tickets — full resolution pipeline"},
 ]
 
 # ── Helpers ────────────────────────────────────────────────────────────────

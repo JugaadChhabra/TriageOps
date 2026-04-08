@@ -1,22 +1,25 @@
 {
-  "name": "outage_crisis",
-  "description": "Hard: burst at step 3 with 60% duplicates, enterprise churn risk, tight SLAs.",
-  "initial_tickets": 12,
-  "max_steps": 18,
+  "name": "full_resolution",
+  "description": "Hard — 20 initial tickets + Poisson arrivals (rate 3.0) + 2 burst events = 30+ total. Must classify, prioritize, respond with quality, detect duplicates, and handle escalations under extreme time pressure. Composite grader across all dimensions.",
+  "initial_tickets": 20,
+  "max_steps": 10,
   "capacity_per_step": 5,
-  "arrival_rate": 2.0,
-  "breach_threshold": 8,
-  "sla_steps": {"p0": 2, "p1": 4, "p2": 6, "p3": 10},
+  "arrival_rate": 3.0,
+  "breach_threshold": 15,
+  "sla_steps": {"p0": 2, "p1": 3, "p2": 5, "p3": 8},
   "seed": 777,
   "bursts": [
-    {"step": 3, "count": 10, "duplicate_ratio": 0.6}
+    {"step": 2, "count": 8, "duplicate_ratio": 0.5},
+    {"step": 5, "count": 12, "duplicate_ratio": 0.6}
   ],
   "enable_duplicates": true,
   "grader_weights": {
-    "resolution_rate": 0.20,
-    "prioritization": 0.20,
-    "sla_compliance": 0.25,
+    "resolution_rate": 0.15,
+    "prioritization": 0.15,
+    "sla_compliance": 0.15,
     "response_quality": 0.15,
-    "duplicate_detection": 0.20
+    "duplicate_detection": 0.15,
+    "classification_accuracy": 0.15,
+    "critical_coverage": 0.10
   }
 }

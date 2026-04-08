@@ -194,10 +194,8 @@ class CustomerSupportEnv:
         resolution_rate = resolved_count / max(total_tickets, 1)
 
         # SLA compliance
-        breached = sum(
-            1 for t in list(self.tickets.values()) + self.resolved_tickets
-            if t.status == TicketStatus.BREACHED
-        )
+        all_tickets = list(self.tickets.values()) + self.resolved_tickets
+        breached = sum(1 for t in all_tickets if t.status == TicketStatus.BREACHED)
         sla_compliance = 1.0 - (breached / max(total_tickets, 1))
 
         # Prioritization (Kendall-tau on resolution order)
@@ -209,15 +207,24 @@ class CustomerSupportEnv:
         # Duplicate detection F1
         duplicate_f1 = self._grade_duplicate_detection()
 
+        # Classification accuracy (correct dept routing + keyword quality)
+        classification = self._grade_classification()
+
+        # Critical coverage (P0/P1 handled before breach)
+        critical_coverage = self._grade_critical_coverage()
+
         breakdown = {
             "resolution_rate": round(resolution_rate, 4),
             "prioritization": round(prioritization, 4),
             "sla_compliance": round(sla_compliance, 4),
             "response_quality": round(response_quality, 4),
             "duplicate_detection": round(duplicate_f1, 4),
+            "classification_accuracy": round(classification, 4),
+            "critical_coverage": round(critical_coverage, 4),
         }
 
-        score = sum(breakdown[k] * weights.get(k, 0.0) for k in breakdown)
+        # Only include components that have non-zero weight
+        score = sum(breakdown.get(k, 0.0) * w for k, w in weights.items())
         score = round(max(0.0, min(1.0, score)), 4)
 
         details = {
@@ -648,6 +655,76 @@ class CustomerSupportEnv:
 
         f1 = 2 * precision * recall / (precision + recall)
         return round(f1, 4)
+
+    def _grade_classification(self) -> float:
+        """Classification accuracy: correct dept routing for escalations + keyword
+        coverage for responses. Measures whether the agent understood ticket category."""
+        if not self.resolved_tickets:
+            return 0.0
+
+        scores: list[float] = []
+        for t in self.resolved_tickets:
+            if t.status == TicketStatus.ESCALATED:
+                # Check if this ticket was routed to the correct department
+                # Look through action_log for this ticket's escalation
+                correct = False
+                for entry in self.action_log:
+                    action_data = entry.get("action", {})
+                    if (action_data.get("ticket_id") == t.id
+                            and action_data.get("action_type") == "escalate"):
+                        info = entry.get("info", {})
+                        correct = info.get("correct_department", False)
+                        break
+                scores.append(1.0 if correct else 0.0)
+            elif t.status == TicketStatus.RESOLVED:
+                # For responses, use the stored quality as a proxy for classification
+                # (keyword coverage implies the agent understood the ticket category)
+                for entry in self.action_log:
+                    action_data = entry.get("action", {})
+                    if (action_data.get("ticket_id") == t.id
+                            and action_data.get("action_type") == "respond"):
+                        info = entry.get("info", {})
+                        quality = info.get("quality", 0.0)
+                        # Keyword coverage is 40% of quality; extract classification signal
+                        # Score > 0.4 means good keyword match → correct classification
+                        scores.append(min(1.0, quality / 0.6))
+                        break
+            elif t.status == TicketStatus.MERGED:
+                # Merges: credit if it was an actual duplicate
+                for entry in self.action_log:
+                    action_data = entry.get("action", {})
+                    if (action_data.get("ticket_id") == t.id
+                            and action_data.get("action_type") == "merge"):
+                        info = entry.get("info", {})
+                        scores.append(1.0 if info.get("was_duplicate", False) else 0.3)
+                        break
+
+        if not scores:
+            return 0.0
+        return round(sum(scores) / len(scores), 4)
+
+    def _grade_critical_coverage(self) -> float:
+        """Fraction of P0/P1 tickets that were handled (resolved/escalated/merged)
+        before or without breaching SLA."""
+        all_tickets = list(self.tickets.values()) + self.resolved_tickets
+        criticals = [t for t in all_tickets
+                     if t.urgency in (TicketUrgency.P0, TicketUrgency.P1)]
+        if not criticals:
+            return 1.0  # No critical tickets → perfect coverage
+
+        handled = sum(
+            1 for t in criticals
+            if t.status in (TicketStatus.RESOLVED, TicketStatus.ESCALATED, TicketStatus.MERGED)
+        )
+        breached_criticals = sum(
+            1 for t in criticals
+            if t.status == TicketStatus.BREACHED
+        )
+
+        # Score: handled / total, with extra penalty for breached criticals
+        coverage = handled / len(criticals)
+        breach_penalty = breached_criticals / len(criticals) * 0.5
+        return round(max(0.0, coverage - breach_penalty), 4)
 
     # ── Observation Builder ────────────────────────────────────────────────
 

@@ -1,20 +1,22 @@
 {
-  "name": "morning_shift",
-  "description": "Easy: 10 tickets, no new arrivals, generous SLAs. A gentle warmup.",
+  "name": "ticket_classification",
+  "description": "Easy — Classify 10 tickets by routing to the correct department or resolving with category-appropriate responses. No time pressure. Grader: classification accuracy (0.8+ for success).",
   "initial_tickets": 10,
-  "max_steps": 12,
-  "capacity_per_step": 4,
+  "max_steps": 15,
+  "capacity_per_step": 10,
   "arrival_rate": 0.0,
-  "breach_threshold": 5,
-  "sla_steps": {"p0": 4, "p1": 6, "p2": 10, "p3": 15},
+  "breach_threshold": 10,
+  "sla_steps": {"p0": 10, "p1": 12, "p2": 15, "p3": 20},
   "seed": 42,
   "bursts": [],
   "enable_duplicates": false,
   "grader_weights": {
+    "classification_accuracy": 0.50,
     "resolution_rate": 0.30,
-    "prioritization": 0.20,
-    "sla_compliance": 0.25,
-    "response_quality": 0.15,
-    "duplicate_detection": 0.10
+    "sla_compliance": 0.10,
+    "response_quality": 0.10,
+    "prioritization": 0.0,
+    "duplicate_detection": 0.0,
+    "critical_coverage": 0.0
   }
 }

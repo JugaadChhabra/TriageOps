@@ -9,14 +9,14 @@ endpoints:
   grade: GET /grade
 
 tasks:
-  - name: morning_shift
-    description: "Easy: 10 tickets, no arrivals, generous SLAs"
+  - name: ticket_classification
+    description: "Easy: classify 10 tickets by routing to correct department or resolving with appropriate responses"
     config_path: server/tasks/task1.json
-  - name: peak_hours
-    description: "Medium: 15 tickets + Poisson arrivals + duplicates"
+  - name: triage_prioritize
+    description: "Medium: triage 20 mixed-urgency tickets with limited capacity, prioritize P0/P1 first"
     config_path: server/tasks/task2.json
-  - name: outage_crisis
-    description: "Hard: burst at step 3, duplicate floods, enterprise churn"
+  - name: full_resolution
+    description: "Hard: 30+ streaming tickets — classify, prioritize, respond, detect duplicates, escalate under time pressure"
     config_path: server/tasks/task3.json
 
 models:

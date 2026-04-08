@@ -23,9 +23,9 @@ An OpenEnv-compliant reinforcement learning environment for a hackathon. An AI a
     ├── environment.py     # Core state machine: CustomerSupportEnv with reset/step/state/grade
     ├── tickets.py         # TicketGenerator: 50+ templates, customer profiles, Poisson arrivals, burst generation
     └── tasks/
-        ├── task1.json     # "morning_shift" — Easy: 10 tickets, no arrivals, generous SLAs
-        ├── task2.json     # "peak_hours" — Medium: 15 tickets + arrivals + duplicates
-        └── task3.json     # "outage_crisis" — Hard: burst at step 3, duplicate floods, enterprise churn
+        ├── task1.json     # "ticket_classification" — Easy: 10 tickets, no arrivals, generous SLAs
+        ├── task2.json     # "triage_prioritize" — Medium: 20 tickets, limited capacity, prioritize P0/P1
+        └── task3.json     # "full_resolution" — Hard: 30+ streaming tickets, full pipeline, tight SLAs
 ```
 
 ## Key Architecture Decisions
@@ -60,7 +60,7 @@ An OpenEnv-compliant reinforcement learning environment for a hackathon. An AI a
 ## Critical Constraints
 
 ### Competition Pass/Fail Gates (must ALL pass or disqualified)
-1. **HF Space responds to POST /reset with 200** — the `/reset` endpoint MUST accept `{}` (empty body) and default to task "morning_shift"
+1. **HF Space responds to POST /reset with 200** — the `/reset` endpoint MUST accept `{}` (empty body) and default to task "ticket_classification"
 2. **`openenv validate` passes** — openenv.yaml must be valid, models must be importable
 3. **`docker build` succeeds** — Dockerfile must work standalone
 4. **`inference.py` runs and produces scores** — must use OpenAI client, read `API_BASE_URL`, `MODEL_NAME`, `HF_TOKEN` env vars
@@ -110,7 +110,7 @@ from server.tickets import TicketGenerator
 from server.environment import CustomerSupportEnv
 from server.app import TASK_CONFIGS
 env = CustomerSupportEnv()
-result = env.reset(TASK_CONFIGS['morning_shift'])
+result = env.reset(TASK_CONFIGS['ticket_classification'])
 print(f'Tickets: {len(result.observation.tickets)}')
 action = SupportAction(action_type=ActionType.RESPOND, ticket_id='TKT-0001', response_text='I apologize for the issue. I have processed your refund.')
 step = env.step(action)
@@ -157,6 +157,6 @@ python inference.py
 - Do NOT use `localStorage` or browser APIs — this is a Python server
 - Do NOT change the [START]/[STEP]/[END] log format in inference.py — it's graded automatically
 - Do NOT use bare `random` module — always use seeded `random.Random(seed)` instance
-- Do NOT make `/reset` require a body — it must accept `{}` (empty JSON) and default to morning_shift
+- Do NOT make `/reset` require a body — it must accept `{}` (empty JSON) and default to ticket_classification
 - Do NOT add dependencies that require compilation (keep `python:3.11-slim` compatible)
 - Do NOT exceed 8GB memory — ticket generation and env state must be lightweight
