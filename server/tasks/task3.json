@@ -15,6 +15,7 @@
   "enable_duplicates": true,
   "vip_ratio": 0.15,
   "landmine_count": 1,
+  "use_realistic_templates": true,
   "department_outage": {"engineering": 4},
   "department_capacity": 5,
   "grader_weights": {

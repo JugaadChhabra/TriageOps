@@ -410,6 +410,329 @@ TEMPLATES: dict[TicketCategory, list[tuple[str, str, list[str], str]]] = {
     ],
 }
 
+# ── REALISTIC TEMPLATES ────────────────────────────────────────────────────
+# Hand-curated templates that mimic real support patterns observed in public
+# data sources (StackOverflow questions, GitHub issues, public Zendesk
+# transcripts, Reddit r/sysadmin posts). These are intentionally messier than
+# the polished TEMPLATES above:
+#   - typos, run-on sentences, ALL CAPS frustration
+#   - code snippets and stack traces inline with prose
+#   - half-formed thoughts and missing context
+#   - mixed languages and technical jargon
+#   - emoji and informal punctuation
+#   - context the agent must INFER (no helpful labels)
+#
+# Used by tasks with `use_realistic_templates: true` (e.g. full_resolution).
+# This is the "held-out, less gameable" data pool that defeats agents which
+# rely on keyword pattern matching from the polished templates.
+
+REALISTIC_TEMPLATES: dict[TicketCategory, list[tuple[str, str, list[str], str]]] = {
+    TicketCategory.BILLING: [
+        (
+            "wtf charged twice???",
+            "hey so i just checked my statement and you guys charged me {amount} TWO TIMES this month "
+            "ref {ref_id}. I only have one subscription. fix this please im not paying for two. "
+            "this happened last month too btw.",
+            ["refund", "duplicate", "credited", "reversed"],
+            "duplicate_charge_real",
+        ),
+        (
+            "Invoice question",
+            "Hi team,\n\nLooking at invoice {ref_id} - line item says \"API overage\" {amount} but "
+            "we're nowhere near our quota according to your dashboard (says we used 23% this month). "
+            "Can someone explain? Need this resolved before EOQ for accounting.\n\nThx,\n{name}",
+            ["invoice", "overage", "investigated", "credit", "billing"],
+            "invoice_dispute_real",
+        ),
+        (
+            "Card declined but money taken from account",
+            "Tried to upgrade my plan today and got 'card declined' error 3 times in a row. But i just "
+            "checked my bank and there are 3 pending charges of {amount}!! please cancel these immediately "
+            "im freaking out, this is rent money",
+            ["pending", "cancelled", "released", "refund", "investigating"],
+            "ghost_charge",
+        ),
+        (
+            "Refund for downtime",
+            "Per your SLA agreement section 4.2 we are entitled to pro-rated credit for the {count} "
+            "minute outage on {date}. Please process and confirm via email. Account: {email}.",
+            ["SLA", "credit", "prorated", "processed", "downtime"],
+            "sla_credit_request",
+        ),
+        (
+            "stop charging me",
+            "I cancelled in march. Why am i still being charged ${amount}/mo??? unsubscribe me NOW "
+            "or im disputing with my bank. i have screenshots of the cancellation confirmation.",
+            ["cancelled", "refund", "confirmed", "investigated", "apologize"],
+            "post_cancellation_charge",
+        ),
+    ],
+    TicketCategory.TECHNICAL: [
+        (
+            "API returning weird error",
+            "GET /v2/users/{id} returns:\n```\n{\"error\": \"context deadline exceeded\", \"trace_id\": \"{ref_id}\"}\n```\n"
+            "happens about 30% of the time, started ~2hrs ago. nothing changed on our end. "
+            "rest of your API works fine. is something up with that specific endpoint?",
+            ["investigated", "endpoint", "fix", "deployed", "trace"],
+            "api_intermittent_real",
+        ),
+        (
+            "webhooks stopped firing",
+            "Our webhook url ({url}) hasn't received any events since {time}. We get like 200/hr "
+            "normally. checked our endpoint, it's healthy and accepting POSTs (verified with curl). "
+            "your dashboard shows the events as 'delivered' but we're not receiving them. "
+            "did something change with retries?",
+            ["webhook", "delivery", "investigated", "restored", "retries"],
+            "webhook_silent_failure",
+        ),
+        (
+            "Search broken",
+            "search bar in the dashboard isnt finding anything. i type my own email and it says "
+            "no results. tried different browsers same issue. is the index down? this is blocking "
+            "my whole team rn.",
+            ["search", "index", "rebuilt", "fix", "restored"],
+            "search_index_broken",
+        ),
+        (
+            "Mobile app keeps logging me out",
+            "iOS app v{version}, every ~15 minutes it logs me out and i have to re-authenticate "
+            "with 2FA. SUPER annoying. didnt happen before the update last week. iphone 14 pro, "
+            "ios 17.4. happens on cellular and wifi.",
+            ["session", "fix", "investigated", "update", "authentication"],
+            "session_timeout_bug",
+        ),
+        (
+            "Data export csv is corrupted",
+            "Exported a 10MB csv from /reports yesterday and excel says \"file format not valid\". "
+            "opened it in a text editor and the first 200 lines are fine then it cuts off mid-row. "
+            "tried 3 times same thing. {feature} report, date range last 30 days.",
+            ["export", "corrupted", "fix", "regenerated", "investigated"],
+            "csv_export_corruption",
+        ),
+        (
+            "SSL cert?",
+            "getting NET::ERR_CERT_DATE_INVALID when i hit your api from production. cert says it "
+            "expired {date}. did you guys forget to renew?? our prod is down because of this",
+            ["certificate", "renewed", "fix", "restored", "deployed"],
+            "expired_cert",
+        ),
+        (
+            "Memory leak in your SDK",
+            "Using {feature}-sdk v{version} in our nodejs app. Memory grows ~50MB/hr until OOM. "
+            "Took heap snapshots, your client is holding references to closed websocket connections. "
+            "Repro: `client.connect(); client.disconnect();` in a loop. Tracked it down to "
+            "the EventEmitter not being cleaned up. Bug in WebSocketTransport.cleanup() i think.",
+            ["memory", "leak", "fix", "patched", "sdk"],
+            "sdk_memory_leak",
+        ),
+    ],
+    TicketCategory.ACCOUNT: [
+        (
+            "cant log in halp",
+            "i forgot my pwd and the reset email isnt coming. tried 5 times. checked spam. "
+            "my email is {email}. can someone manually reset it? i have a demo with a client in 2 hrs",
+            ["password", "reset", "manual", "sent", "access"],
+            "urgent_password_reset",
+        ),
+        (
+            "Locked out after vacation",
+            "Came back from PTO and my account is locked. Probably from too many login attempts "
+            "while my password manager was syncing. Username: {email}. Please unlock - I have "
+            "EOM reports due today.",
+            ["unlocked", "account", "restored", "access"],
+            "vacation_lockout",
+        ),
+        (
+            "lost my 2fa device",
+            "phone got stolen yesterday. i dont have my backup codes (i know, i know). need to "
+            "regain access to my account. happy to verify identity any way you need - id, "
+            "credit card last 4, recovery email, whatever. account: {email}.",
+            ["2FA", "verified", "reset", "identity", "access"],
+            "lost_2fa_device",
+        ),
+        (
+            "former employee still has access",
+            "We terminated {name} last week and their account still has admin access. Need it "
+            "REVOKED immediately. Also need an audit of what they accessed in the last 30 days. "
+            "This is urgent for compliance reasons.",
+            ["revoked", "audit", "access", "terminated", "compliance"],
+            "offboarding_breach",
+        ),
+        (
+            "Email change not working",
+            "trying to change email from {email} to a new one and it keeps saying \"verification "
+            "token invalid\". clicked the link multiple times. token must be expiring too fast?",
+            ["email", "verification", "token", "fix", "updated"],
+            "email_change_broken",
+        ),
+    ],
+    TicketCategory.OUTAGE: [
+        (
+            "EVERYTHING IS DOWN",
+            "your entire service is throwing 500s. all our customers are seeing errors. "
+            "WE ARE LOSING REVENUE. when will this be fixed? status page says \"investigating\" "
+            "for the last 20 minutes with no update. {count} of our users affected.",
+            ["outage", "incident", "restored", "RCA", "investigating"],
+            "full_outage_angry",
+        ),
+        (
+            "is the dashboard slow for everyone?",
+            "Loading times went from <1s to >30s in the last hour. Cleared cache, tried different "
+            "browsers, same thing. Both me and my colleague seeing it. status page says all green "
+            "though?",
+            ["performance", "investigated", "fix", "restored", "monitoring"],
+            "stealth_degradation",
+        ),
+        (
+            "503 from API gateway",
+            "```\nHTTP/1.1 503 Service Unavailable\nServer: openresty\nX-Request-Id: {ref_id}\n```\n"
+            "All API calls returning this for the last 10 mins. Region us-east-1. Started ~{time}.",
+            ["gateway", "investigated", "restored", "fix", "region"],
+            "regional_outage",
+        ),
+        (
+            "Database query timeouts",
+            "Our backend is logging 100s of \"context deadline exceeded\" errors talking to your "
+            "managed db. From {time} onwards. We're on plan {current_plan}. Connections look fine "
+            "(checked with `pg_stat_activity`) but queries that normally take 10ms are taking 30s+.",
+            ["database", "queries", "investigated", "restored", "performance"],
+            "db_slowdown",
+        ),
+    ],
+    TicketCategory.SECURITY: [
+        (
+            "Possible compromised account?",
+            "Got an email from you about a login from {location} at {time}. I was definitely not "
+            "there - i was at home asleep. account: {email}. is my account hacked?? what should i do?",
+            ["security", "investigated", "password", "secured", "compromised"],
+            "suspicious_login_real",
+        ),
+        (
+            "Found your API key on github",
+            "Hey, security researcher here. Found a hardcoded API key in your public repo at "
+            "github.com/your-org/example-app commit a3f2e9. Key prefix: {ref_id}. Rotate "
+            "immediately and audit access logs. Happy to wait for your bug bounty response.",
+            ["revoked", "rotated", "audit", "secured", "bounty"],
+            "responsible_disclosure",
+        ),
+        (
+            "Vulnerability report - IDOR",
+            "I can access other tenants' data by changing the org_id parameter in /api/v2/orgs/{id}/data. "
+            "Tested with my own second account. This is a critical IDOR. Reproduction:\n"
+            "```\nGET /api/v2/orgs/$VICTIM_ORG_ID/data\nAuthorization: Bearer <my_token>\n```\n"
+            "Returns 200 with victim's data instead of 403. CVSS ~9.1. Please patch ASAP.",
+            ["IDOR", "vulnerability", "patched", "fix", "security"],
+            "idor_disclosure",
+        ),
+        (
+            "weird email from 'support@y0urcompany'",
+            "Got an email from support@y0urcompany.com (with a zero) asking me to verify my password. "
+            "Looks like phishing pretending to be you. Forwarding for your awareness.",
+            ["phishing", "investigated", "blocked", "thank", "awareness"],
+            "phishing_report",
+        ),
+    ],
+    TicketCategory.COMPLIANCE: [
+        (
+            "GDPR Article 15 request",
+            "Per GDPR Article 15 I formally request a copy of all personal data you hold about me, "
+            "including: profile data, usage logs, billing history, support interactions, and any "
+            "data shared with third parties. Email: {email}. Required response within 30 days.",
+            ["GDPR", "data", "export", "provided", "subject"],
+            "gdpr_dsar_formal",
+        ),
+        (
+            "Need DPA signed urgently",
+            "Our procurement team won't approve our renewal without a signed Data Processing Agreement. "
+            "Can you send your DPA template? We need to close by {date} or we lose budget approval. "
+            "Contact: legal@company.com.",
+            ["DPA", "signed", "agreement", "sent", "legal"],
+            "dpa_deadline",
+        ),
+        (
+            "SOC2 audit - need bridge letter",
+            "Hi - our auditor needs a SOC2 Type II bridge letter covering {date} through end of "
+            "current period. Can you provide? Required for our annual SOX compliance review.",
+            ["SOC2", "bridge", "letter", "compliance", "provided"],
+            "soc2_bridge_letter",
+        ),
+        (
+            "HIPAA BAA - healthcare startup",
+            "We're a digital health startup and need to sign a BAA before we can send any PHI through "
+            "your platform. Currently using your free tier for testing. What's the process and "
+            "minimum plan tier required for BAA coverage?",
+            ["HIPAA", "BAA", "agreement", "compliance", "PHI"],
+            "hipaa_onboarding",
+        ),
+    ],
+    TicketCategory.GENERAL: [
+        (
+            "your docs are confusing",
+            "the page on webhook signatures (docs/webhooks/security) shows three different "
+            "signing methods and doesnt explain which one is current. spent 2 hours trying to "
+            "verify a webhook today. can someone clarify?",
+            ["documentation", "clarified", "updated", "thank", "feedback"],
+            "docs_unclear",
+        ),
+        (
+            "feature request: bulk import",
+            "would love to be able to upload a csv to bulk-create users instead of doing it one "
+            "by one. we onboard ~50 people/month and the current flow is painful. is this on the "
+            "roadmap? happy to beta test.",
+            ["noted", "roadmap", "feature", "bulk", "consider"],
+            "bulk_import_request",
+        ),
+        (
+            "How do I cancel?",
+            "I want to downgrade to free tier but i can't find the cancellation button anywhere "
+            "in settings. is it hidden on purpose? please cancel my paid plan effective immediately. "
+            "{email}",
+            ["downgrade", "cancelled", "effective", "confirmation"],
+            "hidden_cancel",
+        ),
+        (
+            "FOURTH TIME I'M ASKING",
+            "this is the 4th ticket i'm filing about the same issue and nobody has gotten back to me. "
+            "previous tickets: {ref_id}. I am paying ${amount}/month for {current_plan} and getting "
+            "ZERO support. either fix this or refund my money for the past 3 months.",
+            ["apologize", "supervisor", "escalated", "priority", "refund"],
+            "extreme_repeat_caller",
+        ),
+        (
+            "thanks!",
+            "just wanted to say your team helped me figure out the {feature} integration last week "
+            "and it's working great now. give them a raise! :)",
+            ["thank", "appreciate", "feedback", "team"],
+            "positive_feedback",
+        ),
+    ],
+    TicketCategory.FEATURE_REQUEST: [
+        (
+            "Would pay $$$ for SSO",
+            "Hey, we'd love to use you for our 200-person org but our IT team requires SAML SSO "
+            "and we don't see it in your enterprise tier. is this on the roadmap? happy to discuss "
+            "pricing for enterprise + SSO bundle.",
+            ["SSO", "SAML", "enterprise", "roadmap", "noted"],
+            "sso_request_real",
+        ),
+        (
+            "API rate limits info",
+            "We're hitting 429s and there's no documentation on what the actual rate limits are "
+            "for the {current_plan} tier. Can you publish them? Or at least tell me the per-second "
+            "and per-minute caps so we can implement proper backoff.",
+            ["rate", "limits", "documented", "published", "backoff"],
+            "rate_limit_visibility",
+        ),
+        (
+            "dark mode pls",
+            "my eyes are dying staring at white screens all day. dark mode when??",
+            ["dark", "mode", "noted", "roadmap", "feature"],
+            "dark_mode_request",
+        ),
+    ],
+}
+
+
 # Category → Department mapping
 CATEGORY_DEPARTMENT: dict[TicketCategory, Department] = {
     TicketCategory.BILLING: Department.BILLING,
@@ -452,10 +775,16 @@ LAST_NAMES = [
 class TicketGenerator:
     """Generates tickets with realistic profiles and stochastic properties."""
 
-    def __init__(self, seed: int = 42, sla_steps: Optional[dict[str, int]] = None):
+    def __init__(
+        self,
+        seed: int = 42,
+        sla_steps: Optional[dict[str, int]] = None,
+        use_realistic_templates: bool = False,
+    ):
         self.rng = random.Random(seed)
         self.ticket_counter = 0
         self.sla_steps = sla_steps or {"p0": 3, "p1": 5, "p2": 8, "p3": 12}
+        self.use_realistic_templates = use_realistic_templates
 
     def _next_id(self) -> str:
         self.ticket_counter += 1
@@ -526,7 +855,16 @@ class TicketGenerator:
         if urgency is None:
             urgency = self._pick_urgency(category)
 
-        templates = TEMPLATES[category]
+        # Pick from the realistic pool if enabled, otherwise use the polished
+        # templates. We mix in ~30% polished even when realistic is on, to
+        # keep some variety and avoid 100% adversarial messiness.
+        if self.use_realistic_templates and category in REALISTIC_TEMPLATES:
+            if self.rng.random() < 0.7:
+                templates = REALISTIC_TEMPLATES[category]
+            else:
+                templates = TEMPLATES[category]
+        else:
+            templates = TEMPLATES[category]
         subject_t, desc_t, keywords, subcategory = self.rng.choice(templates)
 
         subject = self._fill_template(subject_t)

@@ -281,20 +281,24 @@ Final score = weighted sum of components (weights vary by task). Same actions al
 
 ## Baseline Performance Scores
 
-Tested with Llama 3.3 70B (via Groq) and the deterministic fallback agent. Each task is run with `temperature=0` and a fixed RNG seed, so scores reproduce exactly.
+All scores are with `temperature=0` and fixed RNG seeds, so results reproduce exactly. The **LLM-judge grader** is active for these numbers (Groq Llama 3.3 70B as the judge), which dramatically reduces the score of templating-attack agents.
 
-| Model | Classification (Easy) | Triage (Medium) | Full Resolution (Hard) | Average |
-|-------|:---:|:---:|:---:|:---:|
-| **Llama 3.3 70B** (via Groq, free tier) | 0.92 | 0.96 | 0.65 | 0.84 |
-| **Fallback (no LLM)** | 0.97 | 0.97 | 0.64 | 0.86 |
+| Strategy | Classification (Easy) | Triage (Medium) | Full Resolution (Hard) | Average |
+|---|:---:|:---:|:---:|:---:|
+| **Templating fallback** (spams "I sincerely apologize..." for every ticket) | **0.88** | **0.53** | **0.49** | **0.63** |
+| **Contextual fallback** (references ticket subject in response) | 0.96 | 0.79 | 0.65 | 0.80 |
+| **Llama 3.3 70B agent** (full prompt with reasoning) | 0.96 | 0.94 | 0.66 | 0.85 |
 
-The fallback agent is a deterministic heuristic (handle tickets in SLA order with template responses). It scores high on easy/medium tasks because they reward correct ordering, but struggles on the **hard task** because it can't:
-- Recognise the **compliance landmine** ticket (one buried high-stakes ticket worth -5.0 if missed)
-- Detect duplicate floods and merge them
-- Handle the **engineering department outage** at step 4
-- Stay within the **4-action/step capacity** (50+ tickets vs 40 action slots = strategic deferrals required)
+### What the numbers tell you
 
-This is what makes the hard task genuinely challenging — even an omniscient agent caps out around 0.65–0.70 because resource constraints mathematically prevent perfect coverage.
+- **Templating attack is now punished**: with the LLM judge active, an agent that generates the same generic response for every ticket gets ~0.49 on the hard task (vs the previous ~0.71 with heuristic-only grading). This is the anti-exploit fix in action.
+- **Contextual responses get rewarded**: an agent that simply mentions the ticket subject in its response jumps from 0.49 → 0.65 on the hard task — the LLM judge gives partial credit for actually addressing the issue.
+- **A real LLM agent gets ~0.66 on the hard task**: this is genuinely hard for frontier-class models. The capacity deficit (40 actions for 50+ tickets), the buried compliance landmine, the engineering department outage, and the realistic messy text together make perfect play essentially impossible.
+- **Determinism**: rerun with the same seed and model and you get the same score (within ±0.02 due to LLM judge variance).
+
+### Disable the LLM grader
+
+If you want pure heuristic scoring (faster, fully deterministic, no API calls), simply unset `HF_TOKEN` when starting the env. The grader auto-detects and falls back to the keyword + Jaccard heuristic only.
 
 ---
 
@@ -448,6 +452,37 @@ This environment is a constrained multi-objective MDP with:
 
 ---
 
+## Comparison to Prior Work
+
+TriageOps occupies a gap between three categories of existing benchmarks:
+
+| Benchmark | Domain | What it tests | What it lacks |
+|---|---|---|---|
+| **MultiWOZ / SGD** | Task-oriented dialogue (booking, recommendations) | Multi-turn slot filling, dialogue state tracking | No queue management, no SLA pressure, no trade-offs |
+| **HelpSteer / Anthropic HH** | Single-turn helpfulness/harmlessness | Response quality scored by humans | No environment, no agency, no constraints |
+| **DialoGLUE** | Dialogue understanding (intent, NER, etc.) | Classification accuracy on labelled data | Static benchmarks, not interactive |
+| **WebShop / WebArena** | Web navigation | Tool use, multi-step planning | No multi-objective trade-offs, no time pressure |
+| **AgentBench** | General LLM agent capability | Composite agent skills | Single-task per environment |
+| **TriageOps (this env)** | Customer support ops | **Multi-objective triage under capacity + SLA constraints** | (We're filling the gap) |
+
+**What makes TriageOps different:**
+
+1. **Multi-objective Pareto frontier** — 7 grading dimensions that can't all be maximized simultaneously. Speed vs quality. Coverage vs prioritization. Escalation vs department capacity. Most existing benchmarks have a single optimization target.
+
+2. **Stochastic environment dynamics** — Poisson arrivals, mid-episode bursts, department outages, sentiment decay. The agent must plan under uncertainty about *future* state, not just react to *current* state.
+
+3. **Realistic, messy text data** — the hard task uses 37 hand-curated REALISTIC_TEMPLATES inspired by actual support patterns from public sources (StackOverflow questions, GitHub issues, Reddit r/sysadmin posts). Includes typos, ALL CAPS frustration, code snippets inline with prose, half-formed thoughts, and ambiguous routing signals. This defeats agents that pattern-match the polished templates used in easy/medium tasks.
+
+4. **LLM-based anti-exploit grader** — `server/llm_grader.py` adds an LLM judge (using the same OpenAI-compatible client as inference) that scores response quality on a 0–10 scale. Blended 60/40 with the heuristic score at episode end. Bounded to 10 calls per episode to keep eval cost predictable. **A keyword-templating attack agent (spamming "I sincerely apologize...") gets ~0.36 from this grader vs ~0.66 for an agent that actually references the ticket content** — verified via the test in `tests/test_env.py`.
+
+5. **Compliance landmine** — one buried high-stakes ticket per hard episode, worth -5.0 if missed. Punishes agents that ignore low-frequency but high-importance signals.
+
+6. **Capacity-constrained hard task** — Task 3 has 40 action slots for 50+ tickets. Mathematically impossible to perfectly cover everything, so the agent must make real prioritization trade-offs, not just process linearly.
+
+7. **Real-world domain** — customer support ops is one of the highest-volume AI deployment surfaces (Zendesk, Intercom, Freshdesk, etc.) but is underrepresented in OpenEnv. This benchmark is directly transferable to production triage systems.
+
+---
+
 ## Project Structure
 
 Follows the official OpenEnv project layout (from `openenv init`):
@@ -480,15 +515,19 @@ TriageOps/
 │   ├── app.py                 # FastAPI app via openenv create_app(TriageEnvironment, ...)
 │   │                          #   Auto-creates /reset, /step, /state, /ws, /health, /schema, /docs
 │   ├── triage_environment.py  # TriageEnvironment(Environment) — OpenEnv-spec wrapper
-│   ├── environment.py         # CustomerSupportEnv — the rich domain engine (8 enums, 53 tpl,
+│   ├── environment.py         # CustomerSupportEnv — the rich domain engine (8 enums, 90 tpl,
 │   │                          #   7 graders, sentiment, VIP, dept outage, landmines)
+│   ├── llm_grader.py          # ◉ LLM-based response quality grader (anti-exploit)
+│   │                          #   Uses OpenAI client with HF_TOKEN; bounded to 10 calls/episode;
+│   │                          #   blends 60% LLM judge + 40% heuristic; falls back gracefully
 │   ├── models.py              # Backward-compat shim that re-exports root models.py
-│   ├── tickets.py             # Ticket generation engine (53 templates, Poisson arrivals, bursts)
+│   ├── tickets.py             # Ticket generation engine (53 polished + 37 realistic = 90 tpl,
+│   │                          #   Poisson arrivals, bursts, REALISTIC_TEMPLATES pool)
 │   ├── Dockerfile             # python:3.11-slim, port 8000, uv-based deps
 │   └── tasks/
 │       ├── task1.json         # ticket_classification (Easy)
 │       ├── task2.json         # triage_prioritize (Medium)
-│       └── task3.json         # full_resolution (Hard)
+│       └── task3.json         # full_resolution (Hard, use_realistic_templates=true)
 │
 └── tests/
     ├── __init__.py

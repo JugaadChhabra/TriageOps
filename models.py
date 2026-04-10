@@ -265,6 +265,10 @@ class TaskConfig(BaseModel):
     landmine_count: int = Field(
         default=0, description="Number of compliance landmine tickets (heavy penalty if missed)"
     )
+    use_realistic_templates: bool = Field(
+        default=False,
+        description="Use the messy, hand-curated REALISTIC_TEMPLATES pool instead of polished templates",
+    )
     department_outage: Optional[dict[str, int]] = Field(
         default=None,
         description="Department outage event: {department_name: step_when_it_goes_down}",

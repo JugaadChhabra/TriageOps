@@ -138,18 +138,31 @@ class CustomerSupportEnv:
         self.department_queues: dict[Department, int] = {d: 0 for d in Department}
         self.merge_map: dict[str, str] = {}  # merged_id → target_id
         self._response_qualities: list[float] = []
+        # (ticket_subject, ticket_description, agent_response) for LLM grading
+        self._response_records: list[tuple[str, str, str]] = []
         self._resolution_order: list[str] = []
         self._detected_duplicates: set[str] = set()
         self._actual_duplicates: set[str] = set()
         self._action_history: dict[str, list[str]] = {}  # ticket_id → [action_types]
         self._initial_sla: dict[str, int] = {}  # ticket_id → original SLA at creation
         self._normalized_reward: float = 0.0
+        # LLM-based response quality grader (anti-exploit). Initialized lazily;
+        # falls back to None if no API credentials are available.
+        from .llm_grader import LLMGrader
+
+        self._llm_grader: Optional[LLMGrader] = LLMGrader()
+        if not self._llm_grader.is_available():
+            self._llm_grader = None
 
     def reset(self, config: TaskConfig) -> StepResult:
         """Initialize a new episode."""
         self.config = config
         self.rng = random.Random(config.seed)
-        self.generator = TicketGenerator(seed=config.seed, sla_steps=config.sla_steps)
+        self.generator = TicketGenerator(
+            seed=config.seed,
+            sla_steps=config.sla_steps,
+            use_realistic_templates=getattr(config, "use_realistic_templates", False),
+        )
         self.tickets = {}
         self.resolved_tickets = []
         self.action_log = []
@@ -160,6 +173,10 @@ class CustomerSupportEnv:
         self.department_queues = {d: 0 for d in Department}
         self.merge_map = {}
         self._response_qualities = []
+        self._response_records = []
+        # Reset LLM grader budget for the new episode
+        if self._llm_grader is not None:
+            self._llm_grader.reset_budget()
         self._resolution_order = []
         self._detected_duplicates = set()
         self._actual_duplicates = set()
@@ -341,6 +358,8 @@ class CustomerSupportEnv:
 
         quality = self._evaluate_response_quality(response_text, ticket)
         self._response_qualities.append(quality)
+        # Record (subject, description, response) for end-of-episode LLM grading
+        self._response_records.append((ticket.subject, ticket.description, response_text))
 
         u_mult = URGENCY_MULT[ticket.urgency]
         t_mult = TIER_MULT[ticket.customer.tier.value]
@@ -787,9 +806,48 @@ class CustomerSupportEnv:
         return round((tau + 1) / 2, 4)
 
     def _grade_response_quality(self) -> float:
+        """
+        Grade response quality. If an LLM grader is available, blend its
+        judgement with the heuristic score (60% LLM + 40% heuristic). Otherwise
+        use pure heuristic. The LLM grading is sampled and bounded by the
+        grader's per-episode budget so eval time stays predictable.
+        """
         if not self._response_qualities:
             return 0.0
-        return round(sum(self._response_qualities) / len(self._response_qualities), 4)
+
+        heuristic_score = sum(self._response_qualities) / len(self._response_qualities)
+
+        # If no LLM grader, return pure heuristic
+        if self._llm_grader is None or not self._response_records:
+            return round(heuristic_score, 4)
+
+        # Sample up to MAX_LLM_GRADE_SAMPLES responses for LLM grading.
+        # Spread the sample across the trajectory (early, middle, late) so we
+        # catch templating in different episode phases.
+        from .llm_grader import MAX_LLM_GRADE_SAMPLES, LLM_BLEND_WEIGHT
+
+        n_records = len(self._response_records)
+        if n_records <= MAX_LLM_GRADE_SAMPLES:
+            sample_indices = list(range(n_records))
+        else:
+            # Even spread across the trajectory
+            step = n_records / MAX_LLM_GRADE_SAMPLES
+            sample_indices = [int(i * step) for i in range(MAX_LLM_GRADE_SAMPLES)]
+
+        llm_scores: list[float] = []
+        for idx in sample_indices:
+            subject, description, response = self._response_records[idx]
+            score = self._llm_grader.score_response(subject, description, response)
+            if score is not None:
+                llm_scores.append(score)
+
+        # If every LLM call failed, fall back to heuristic
+        if not llm_scores:
+            return round(heuristic_score, 4)
+
+        llm_avg = sum(llm_scores) / len(llm_scores)
+        blended = LLM_BLEND_WEIGHT * llm_avg + (1.0 - LLM_BLEND_WEIGHT) * heuristic_score
+        return round(max(0.0, min(1.0, blended)), 4)
 
     def _grade_duplicate_detection(self) -> float:
         """F1 score for duplicate detection."""
