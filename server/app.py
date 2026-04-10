@@ -37,6 +37,36 @@ app = create_app(
 )
 
 
+# Root route — HF Space's "App" tab loads `/`, so show a useful landing
+# page instead of the default 404 from create_app(). All real endpoints
+# (/health, /reset, /step, /state, /ws, /docs, /schema, /metadata) come
+# from create_app().
+@app.get("/")
+def root() -> dict:
+    return {
+        "name": "triageops",
+        "description": "AI Customer Support Ops — OpenEnv RL Environment",
+        "team": "Pied Piper (Muaaz Shaikh, Mantek Singh Burn, Jugaad Chhabra)",
+        "version": "1.0.0",
+        "tasks": ["ticket_classification", "triage_prioritize", "full_resolution"],
+        "endpoints": {
+            "websocket": "/ws",
+            "reset": "POST /reset",
+            "step": "POST /step",
+            "state": "GET /state",
+            "health": "GET /health",
+            "metadata": "GET /metadata",
+            "schema": "GET /schema",
+            "docs": "/docs",
+        },
+        "client_usage": (
+            "from client import TriageOpsEnv; "
+            "env = await TriageOpsEnv.from_docker_image('triageops:latest')"
+        ),
+        "github": "https://github.com/JugaadChhabra/TriageOps",
+    }
+
+
 def main(host: str = "0.0.0.0", port: int = 8000) -> None:
     """
     Entry point for direct execution.
