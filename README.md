@@ -4,10 +4,10 @@ emoji: 🎫
 colorFrom: blue
 colorTo: purple
 sdk: docker
-app_port: 7860
+app_port: 8000
+pinned: false
 tags:
   - openenv
-pinned: false
 ---
 
 # TriageOps — AI Customer Support Ops
@@ -39,11 +39,14 @@ An agent sees a live ticket queue each step, must decide **which** tickets to ac
 **What we built:**
 
 - A real-world **customer support triage simulation** (not a game or toy)
-- Full **OpenEnv spec compliance** — typed models, step/reset/state, openenv.yaml, passes `openenv validate`
-- **3 tasks** with increasing difficulty (easy, medium, hard) and 7 deterministic graders scoring 0.0–1.0
-- **Dense reward function** with per-action rewards, per-step penalties, and episode bonuses — penalizes gaming, rewards genuine triage skill
-- **Baseline inference script** using OpenAI client with reproducible scores across all 3 tasks
-- **Deployed on Hugging Face Spaces** with working Dockerfile
+- Full **OpenEnv-core SDK integration** — `TriageEnvironment` inherits from `openenv.core.env_server.interfaces.Environment`, server uses `create_app()`, and the typed `TriageOpsEnv` client subclasses `EnvClient[TriageAction, TriageObservation, TriageState]` with `from_docker_image()` support
+- **Typed Pydantic models** at project root (`models.py`) inheriting from `openenv.core.env_server.types.{Action, Observation, State}`
+- **3 tasks** with progressive difficulty (easy → medium → hard) and 7 deterministic graders scoring 0.0–1.0
+- **Dense reward function** with per-action rewards, per-step penalties, and episode bonuses — penalizes gaming, rewards genuine triage skill, includes **Jaccard semantic overlap** to defeat keyword templating
+- **Hard task** features: 50+ tickets, 4 actions/step (deficit by design), VIP weighting, mid-episode department outage, and a buried **compliance landmine** ticket worth -5.0 if missed
+- **Baseline inference script** using OpenAI client + the typed `TriageOpsEnv` SDK over WebSocket, with reproducible scores across all 3 tasks
+- **31 unit tests** (`pytest tests/test_env.py`) covering reset/step/state, all 7 graders, edge cases, ticket generation, and end-to-end WebSocket round-trip
+- **Deployed on Hugging Face Spaces** with working Dockerfile and `openenv validate` passing
 
 ---
 
@@ -278,73 +281,146 @@ Final score = weighted sum of components (weights vary by task). Same actions al
 
 ## Baseline Performance Scores
 
-Tested with Llama 3.3 70B (via Groq) and fallback agent:
+Tested with Llama 3.3 70B (via Groq) and the deterministic fallback agent. Each task is run with `temperature=0` and a fixed RNG seed, so scores reproduce exactly.
 
-| Model | Classification | Triage | Full Resolution | Average |
+| Model | Classification (Easy) | Triage (Medium) | Full Resolution (Hard) | Average |
 |-------|:---:|:---:|:---:|:---:|
-| Llama 3.3 70B | 0.92 | 0.96 | 0.71 | 0.86 |
-| Fallback (no LLM) | 0.97 | 0.98 | 0.70 | 0.88 |
+| **Llama 3.3 70B** (via Groq, free tier) | 0.92 | 0.96 | 0.65 | 0.84 |
+| **Fallback (no LLM)** | 0.97 | 0.97 | 0.64 | 0.86 |
 
-*Scores are deterministic given the same model and temperature=0. The fallback agent scores high on easy/medium tasks (just responds in SLA order) but cannot do smart routing, duplicate detection, or quality responses that an LLM agent can.*
+The fallback agent is a deterministic heuristic (handle tickets in SLA order with template responses). It scores high on easy/medium tasks because they reward correct ordering, but struggles on the **hard task** because it can't:
+- Recognise the **compliance landmine** ticket (one buried high-stakes ticket worth -5.0 if missed)
+- Detect duplicate floods and merge them
+- Handle the **engineering department outage** at step 4
+- Stay within the **4-action/step capacity** (50+ tickets vs 40 action slots = strategic deferrals required)
+
+This is what makes the hard task genuinely challenging — even an omniscient agent caps out around 0.65–0.70 because resource constraints mathematically prevent perfect coverage.
+
+---
+
+## Using the Typed SDK Client (Python)
+
+After deployment, the environment is consumable as a typed Python client (over WebSocket):
+
+```python
+import asyncio
+from client import TriageOpsEnv
+from models import TriageAction, ActionType
+
+async def main():
+    # Option A: spin up a Docker container and connect
+    env = await TriageOpsEnv.from_docker_image("triageops:latest")
+
+    # Option B: connect to an already-running server (HF Space, local docker, uv run)
+    # async with TriageOpsEnv(base_url="https://muaazs-triageops.hf.space") as env:
+
+    try:
+        # Reset selects the task; default is ticket_classification
+        result = await env.reset(task="full_resolution")
+        print(f"{len(result.observation.tickets)} initial tickets")
+
+        # Step with a fully typed action
+        tid = result.observation.tickets[0].id
+        result = await env.step(TriageAction(
+            action_type=ActionType.RESPOND,
+            ticket_id=tid,
+            response_text="I sincerely apologize. I have resolved this immediately and will follow up.",
+        ))
+        print(f"reward={result.reward:.2f}, done={result.done}")
+
+        # Get full episode state with grade breakdown
+        state = await env.state()
+        print(f"step_count={state.step_count}, score={state.final_score}")
+    finally:
+        await env.close()
+
+asyncio.run(main())
+```
+
+For sync code, use the `.sync()` wrapper:
+```python
+with TriageOpsEnv(base_url="http://localhost:8000").sync() as env:
+    result = env.reset()
+    result = env.step(TriageAction(action_type=ActionType.RESPOND, ticket_id="TKT-0001", response_text="..."))
+```
 
 ---
 
 ## Setup & Usage Instructions
 
-### 1. Run with Docker (recommended)
+### 1. Run via uv (the OpenEnv way)
+
+```bash
+# Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Sync deps and start the server (uses [project.scripts] server entry point)
+uv sync
+uv run server
+# → Uvicorn running on http://0.0.0.0:8000
+```
+
+### 2. Run with Docker (HF Spaces deployment path)
 
 ```bash
 docker build -t triageops .
-docker run -p 7860:7860 triageops
+docker run -p 8000:8000 triageops
 ```
 
-### 2. Run Locally
+### 3. Run Locally without uv
 
 ```bash
 pip install -r requirements.txt
-uvicorn server.app:app --host 0.0.0.0 --port 7860
+uvicorn server.app:app --host 0.0.0.0 --port 8000
 ```
 
-### 3. Run Inference Script
+### 4. Run the Inference Script
 
 ```bash
 export API_BASE_URL="https://api.openai.com/v1"   # required, has default
 export MODEL_NAME="gpt-4o-mini"                    # required, has default
 export HF_TOKEN="your-api-key-here"                # MANDATORY
-export ENV_URL="http://localhost:7860"
+export ENV_URL="http://localhost:8000"             # if connecting to running server
+# OR set LOCAL_IMAGE_NAME="triageops:latest"       # to spin up via Docker
 
 python inference.py
 ```
 
-### 4. Test Endpoints
+The inference script uses the typed `TriageOpsEnv` client over WebSocket and emits the exact OpenEnv `[START]` / `[STEP]` / `[END]` plain-text format to stdout.
+
+### 5. Test Endpoints
 
 ```bash
 # Health check
-curl http://localhost:7860/health
+curl http://localhost:8000/health
+# {"status":"healthy"}
 
-# Reset (empty body defaults to ticket_classification)
-curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d '{}'
+# Metadata
+curl http://localhost:8000/metadata
 
-# Take an action
-curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d '{
-  "action_type": "respond",
-  "ticket_id": "TKT-0001",
-  "response_text": "I apologize for the inconvenience. I have processed your refund immediately."
-}'
+# Schema (action / observation / state JSON Schemas)
+curl http://localhost:8000/schema
+
+# Reset (HTTP path is stateless — use the WebSocket client for real episodes)
+curl -X POST http://localhost:8000/reset -H "Content-Type: application/json" -d '{}'
 
 # Get current state
-curl http://localhost:7860/state
-
-# Get grade
-curl http://localhost:7860/grade
+curl http://localhost:8000/state
 ```
 
-### 5. Validate Before Submitting
+### 6. Validate Before Submitting
 
 ```bash
 pip install openenv-core
-openenv validate                              # static validation
-openenv validate --url http://localhost:7860   # runtime validation (6/6 criteria)
+openenv validate                                # static validation (5/5 deployment modes)
+openenv validate --url http://localhost:8000     # runtime validation (6/6 criteria)
+```
+
+### 7. Run the unit tests
+
+```bash
+pytest tests/test_env.py -v
+# 31 passed in ~3s
 ```
 
 ---
@@ -374,29 +450,58 @@ This environment is a constrained multi-objective MDP with:
 
 ## Project Structure
 
+Follows the official OpenEnv project layout (from `openenv init`):
+
 ```
 TriageOps/
-├── openenv.yaml          # OpenEnv metadata + action/observation schemas
-├── pyproject.toml         # Python project config
-├── inference.py           # Baseline inference script
-├── Dockerfile             # python:3.11-slim, port 7860
+├── openenv.yaml              # OpenEnv manifest (spec_version, runtime, port, tasks)
+├── pyproject.toml             # Python project + [project.scripts] server entry point
+├── uv.lock                    # Reproducible dependency lockfile
+├── requirements.txt           # Pip-installable deps (mirrors pyproject)
+├── Dockerfile                 # Mirror of server/Dockerfile (root + server/ both work)
 ├── .dockerignore
-├── requirements.txt       # fastapi, uvicorn, pydantic, httpx, openai, pyyaml
-├── README.md              # This file
-├── uv.lock
+├── README.md                  # This file (also HF Space metadata header)
+│
+├── models.py                  # ◉ Action/Observation/State at ROOT (OpenEnv convention)
+│                              #   TriageAction(Action), TriageObservation(Observation),
+│                              #   TriageState(State) — all inherit from openenv.core.env_server.types
+│
+├── client.py                  # ◉ TriageOpsEnv(EnvClient[...]) at ROOT (OpenEnv convention)
+│                              #   Implements _step_payload, _parse_result, _parse_state
+│                              #   Inherits from_docker_image(), reset(), step(), close() for free
+│
+├── __init__.py                # Re-exports TriageOpsEnv + models for `from triageops import ...`
+│
+├── inference.py               # Baseline LLM agent — uses async TriageOpsEnv client over WebSocket
+│                              #   Emits exact [START]/[STEP]/[END] plain-text format
+│
 ├── server/
 │   ├── __init__.py
-│   ├── app.py             # FastAPI endpoints
-│   ├── environment.py     # Core state machine
-│   ├── models.py          # Pydantic schemas (all typed)
-│   ├── tickets.py         # Ticket generation (53 templates)
+│   ├── app.py                 # FastAPI app via openenv create_app(TriageEnvironment, ...)
+│   │                          #   Auto-creates /reset, /step, /state, /ws, /health, /schema, /docs
+│   ├── triage_environment.py  # TriageEnvironment(Environment) — OpenEnv-spec wrapper
+│   ├── environment.py         # CustomerSupportEnv — the rich domain engine (8 enums, 53 tpl,
+│   │                          #   7 graders, sentiment, VIP, dept outage, landmines)
+│   ├── models.py              # Backward-compat shim that re-exports root models.py
+│   ├── tickets.py             # Ticket generation engine (53 templates, Poisson arrivals, bursts)
+│   ├── Dockerfile             # python:3.11-slim, port 8000, uv-based deps
 │   └── tasks/
-│       ├── task1.json     # ticket_classification (Easy)
-│       ├── task2.json     # triage_prioritize (Medium)
-│       └── task3.json     # full_resolution (Hard)
+│       ├── task1.json         # ticket_classification (Easy)
+│       ├── task2.json         # triage_prioritize (Medium)
+│       └── task3.json         # full_resolution (Hard)
+│
 └── tests/
-    └── test_env.py        # 31 unit tests
+    ├── __init__.py
+    └── test_env.py            # 31 unit tests (reset/step/state, all 7 graders, edge cases,
+                               #   ticket generation, end-to-end WebSocket round-trip)
 ```
+
+### Key Architectural Decisions
+
+- **`models.py` and `client.py` at project root** — matches the OpenEnv scaffold convention so the typed Python client is `from triageops.client import TriageOpsEnv` (or `from client import TriageOpsEnv` when running locally)
+- **`server/triage_environment.py`** wraps the existing `CustomerSupportEnv` engine in a thin `Environment` subclass — preserves all the rich domain logic while exposing the OpenEnv contract
+- **`server/app.py` is a 30-line factory call** — `create_app(TriageEnvironment, TriageAction, TriageObservation, env_name="triageops")` — no custom routing, no manual session handling
+- **Backward-compat shim** (`server/models.py` re-exports root `models.py`) lets the legacy domain engine keep its `from .models import ...` imports working without changes
 
 ---
 

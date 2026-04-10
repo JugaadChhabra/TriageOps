@@ -574,6 +574,24 @@ class TicketGenerator:
         n = self.rng.poisson(rate) if hasattr(self.rng, "poisson") else self._poisson(rate)
         return [self.generate_ticket(current_step=current_step, vip_ratio=vip_ratio) for _ in range(n)]
 
+    def generate_landmine(self, current_step: int = 0) -> Ticket:
+        """
+        Generate a 'compliance landmine' ticket — a high-stakes compliance issue
+        disguised as a low-priority/innocuous request. If missed, it costs the
+        agent a heavy negative reward at episode end.
+
+        Used by the hard task to punish agents that ignore high-LTV compliance
+        signals buried in noise.
+        """
+        t = self.generate_ticket(
+            category=TicketCategory.COMPLIANCE,
+            urgency=TicketUrgency.P1,
+            current_step=current_step,
+            force_customer_tier=CustomerTier.ENTERPRISE,
+        )
+        t.is_landmine = True
+        return t
+
     def _poisson(self, lam: float) -> int:
         """Simple Poisson sample using inverse transform."""
         import math

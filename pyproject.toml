@@ -1,17 +1,46 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "triageops"
 version = "1.0.0"
-description = "AI Customer Support Ops — OpenEnv RL Environment"
-requires-python = ">=3.11"
+description = "TriageOps — AI Customer Support Ops OpenEnv RL Environment"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    {name = "Muaaz Shaikh", email = "muaaz5731@gmail.com"},
+    {name = "Mantek Singh Burn", email = "manteksburn@gmail.com"},
+    {name = "Jugaad Chhabra", email = "jugaad.chhabra@gmail.com"},
+]
+license = {text = "MIT"}
+keywords = ["openenv", "reinforcement-learning", "customer-support", "rl", "agents"]
 dependencies = [
+    "openenv-core[core]>=0.2.2",
     "fastapi>=0.104.0",
     "uvicorn>=0.24.0",
     "pydantic>=2.5.0",
     "httpx>=0.25.0",
     "openai>=1.6.0",
     "pyyaml>=6.0.1",
-    "openenv-core>=0.2.0",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
 ]
 
 [project.scripts]
+# Server entry point - enables running via: uv run server
 server = "server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["triageops", "triageops.server"]
+package-dir = { "triageops" = ".", "triageops.server" = "server" }
+
+[tool.setuptools.package-data]
+triageops = ["openenv.yaml", "README.md"]
+"triageops.server" = ["tasks/*.json", "Dockerfile"]

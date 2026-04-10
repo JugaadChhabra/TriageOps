@@ -46,6 +46,10 @@ EMPTY_CLOSE_PENALTY = -0.4
 # Penalty when a ticket breaches SLA while agent had capacity (forced escalation)
 BREACH_ESCALATION_PENALTY = -0.5
 
+# Heavy penalty for ignoring a "compliance landmine" ticket (hard task).
+# Applied at episode end for each landmine left in OPEN/IN_PROGRESS/BREACHED state.
+LANDMINE_PENALTY = -5.0
+
 URGENCY_MULT = {
     TicketUrgency.P0: 3.0,
     TicketUrgency.P1: 2.0,
@@ -174,6 +178,13 @@ class CustomerSupportEnv:
             self._initial_sla[t.id] = t.sla_remaining
             if t.duplicate_of is not None:
                 self._actual_duplicates.add(t.id)
+
+        # Generate compliance landmine tickets (hard task only)
+        landmine_count = getattr(config, "landmine_count", 0)
+        for _ in range(landmine_count):
+            mine = self.generator.generate_landmine(current_step=0)
+            self.tickets[mine.id] = mine
+            self._initial_sla[mine.id] = mine.sla_remaining
 
         obs = self._build_observation()
         return StepResult(observation=obs, reward=0.0, done=False, info={"message": "Episode started"})
@@ -468,8 +479,7 @@ class CustomerSupportEnv:
 
         response_lower = response.lower()
 
-        # Keyword coverage with synonym expansion (40%)
-        # Lightweight semantic overlap: check for exact keywords OR common synonyms
+        # ── (1) Keyword coverage with synonyms (35%) ────────────────────────
         keywords = ticket.resolution_keywords
         if keywords:
             matched = 0
@@ -483,7 +493,23 @@ class CustomerSupportEnv:
         else:
             keyword_score = 0.5
 
-        # Length score (15%) — sweet spot 50-300 chars
+        # ── (2) Jaccard semantic overlap with the ticket text (15%) ─────────
+        # Lightweight bag-of-words overlap between response and ticket subject+body.
+        # Anti-templating: penalizes generic responses that don't reference the
+        # actual ticket content. No embeddings needed — fits in 8GB easily.
+        ticket_text = (ticket.subject + " " + ticket.description).lower()
+        ticket_tokens = self._content_tokens(ticket_text)
+        response_tokens = self._content_tokens(response_lower)
+        if ticket_tokens and response_tokens:
+            intersection = ticket_tokens & response_tokens
+            union = ticket_tokens | response_tokens
+            jaccard = len(intersection) / max(len(union), 1)
+            # Scale: jaccard >0.15 is excellent for this domain
+            semantic_score = min(1.0, jaccard / 0.15)
+        else:
+            semantic_score = 0.0
+
+        # ── (3) Length score (10%) — sweet spot 50-300 chars ────────────────
         length = len(response)
         if length < 20:
             length_score = 0.1
@@ -496,34 +522,57 @@ class CustomerSupportEnv:
         else:
             length_score = 0.6
 
-        # Empathy (15%)
+        # ── (4) Empathy (15%) ───────────────────────────────────────────────
         empathy_count = sum(1 for w in EMPATHY_WORDS if w in response_lower)
         empathy_score = min(1.0, empathy_count / 2)
 
-        # Actionability (15%)
+        # ── (5) Actionability (10%) ─────────────────────────────────────────
         action_count = sum(1 for p in ACTIONABILITY_PHRASES if p in response_lower)
         actionability_score = min(1.0, action_count / 2)
 
-        # Sentiment alignment (15%): low-sentiment tickets need more empathy,
-        # high-sentiment tickets need more actionability
+        # ── (6) Sentiment alignment (15%) ───────────────────────────────────
         if ticket.sentiment < 0.3:
-            # Angry customer — empathy matters more
             sentiment_score = min(1.0, empathy_count / 1.5)
         elif ticket.sentiment > 0.7:
-            # Happy customer — just be helpful and actionable
             sentiment_score = min(1.0, action_count / 1.5)
         else:
-            # Neutral — balanced response is fine
             sentiment_score = min(1.0, (empathy_count + action_count) / 3)
 
         quality = (
-            0.40 * keyword_score
-            + 0.15 * length_score
+            0.35 * keyword_score
+            + 0.15 * semantic_score
+            + 0.10 * length_score
             + 0.15 * empathy_score
-            + 0.15 * actionability_score
+            + 0.10 * actionability_score
             + 0.15 * sentiment_score
         )
         return round(max(0.0, min(1.0, quality)), 4)
+
+    @staticmethod
+    def _content_tokens(text: str) -> set[str]:
+        """Tokenize text into lowercase content words for Jaccard similarity."""
+        # Strip punctuation, drop short tokens, drop common stopwords
+        import re
+
+        stopwords = {
+            "the", "a", "an", "and", "or", "but", "is", "are", "was", "were",
+            "be", "been", "being", "have", "has", "had", "do", "does", "did",
+            "will", "would", "could", "should", "may", "might", "must", "shall",
+            "can", "i", "you", "we", "they", "he", "she", "it", "this", "that",
+            "these", "those", "my", "your", "our", "their", "his", "her", "its",
+            "for", "of", "in", "on", "at", "to", "from", "with", "by", "as",
+            "if", "so", "no", "not", "yes", "all", "any", "some", "each", "more",
+            "most", "other", "such", "only", "own", "same", "than", "too", "very",
+            "s", "t", "just", "now", "also", "about", "very", "out", "up", "down",
+            "what", "which", "who", "when", "where", "why", "how", "im", "ive",
+            "ill", "id", "youre", "weve", "well", "wont", "dont", "cant", "isnt",
+            "please", "thank", "thanks", "hi", "hello", "regards",
+        }
+        tokens = {
+            t for t in re.findall(r"[a-z][a-z]{2,}", text)
+            if t not in stopwords
+        }
+        return tokens
 
     # ── Reward Normalization ───────────────────────────────────────────────
 
@@ -675,6 +724,18 @@ class CustomerSupportEnv:
             ratio = len(self.resolved_tickets) / total
             bonus = round(MAX_RESOLUTION_BONUS * ratio, 4)
             self.total_reward = round(self.total_reward + bonus, 4)
+
+        # Compliance LANDMINE penalty: any landmine ticket that wasn't handled
+        # (resolved/escalated/merged) by end of episode costs -5.0 each.
+        # This punishes agents that ignore high-stakes compliance signals
+        # buried in the noise.
+        for t in list(self.tickets.values()) + self.resolved_tickets:
+            if getattr(t, "is_landmine", False) and t.status not in (
+                TicketStatus.RESOLVED,
+                TicketStatus.ESCALATED,
+                TicketStatus.MERGED,
+            ):
+                self.total_reward = round(self.total_reward + LANDMINE_PENALTY, 4)
 
     # ── Grading Sub-functions ──────────────────────────────────────────────
 

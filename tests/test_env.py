@@ -12,7 +12,10 @@ from server.models import (
     StepResult, SupportAction, TicketStatus, TicketUrgency, TicketView,
 )
 from server.tickets import TicketGenerator, TEMPLATES
-from server.app import TASK_CONFIGS
+from server.triage_environment import get_task_configs
+
+# Tasks are now loaded by the OpenEnv-spec wrapper (triage_environment.py)
+TASK_CONFIGS = get_task_configs()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -240,7 +243,12 @@ class TestTickets:
         assert 1.0 < avg < 3.5
 
 
-# ── FastAPI Endpoints ──────────────────────────────────────────────────────
+# ── FastAPI Endpoints (HTTP, stateless per-request via create_app) ────────
+#
+# Note: HTTP /reset and /step are STATELESS in the OpenEnv create_app() factory.
+# Each request gets a fresh Environment instance via the factory, so multi-call
+# episodes must use the WebSocket /ws endpoint via the EnvClient subclass.
+# These tests just verify the HTTP surface is up and shape-correct.
 
 class TestEndpoints:
     def _client(self):
@@ -254,7 +262,9 @@ class TestEndpoints:
 
     def test_metadata(self):
         r = self._client().get("/metadata")
-        assert r.json()["name"] == "TriageOps"
+        # OpenEnv create_app() returns EnvironmentMetadata; name follows env_name="triageops"
+        assert r.json()["name"] == "triageops"
+        assert "description" in r.json()
 
     def test_schema_endpoint(self):
         d = self._client().get("/schema").json()
@@ -266,7 +276,10 @@ class TestEndpoints:
     def test_reset_empty_body(self):
         r = self._client().post("/reset", json={})
         assert r.status_code == 200
-        assert len(r.json()["observation"]["tickets"]) == 10
+        # OpenEnv create_app wraps observation under "observation" key
+        body = r.json()
+        assert "observation" in body
+        assert len(body["observation"]["tickets"]) == 10
 
     def test_reset_all_tasks(self):
         c = self._client()
@@ -274,28 +287,67 @@ class TestEndpoints:
             assert c.post("/reset", json={"task": name}).status_code == 200
 
     def test_reset_invalid_task(self):
-        assert self._client().post("/reset", json={"task": "nope"}).status_code == 404
+        """Invalid task name → ValueError raised inside the env.
+        OpenEnv create_app surfaces this as a 500 / lets it propagate from the
+        thread-pool — we just verify the env *itself* rejects bad task names."""
+        import pytest
+        from server.triage_environment import TriageEnvironment
 
-    def test_step_respond(self):
-        c = self._client()
-        c.post("/reset", json={})
-        tid = c.get("/state").json()["tickets"][0]["id"]
-        r = c.post("/step", json={
-            "action_type": "respond", "ticket_id": tid,
-            "response_text": "I apologize. Fixed immediately.",
-        })
-        assert r.status_code == 200
-        assert "reward" in r.json()
+        env = TriageEnvironment()
+        with pytest.raises(ValueError):
+            env.reset(task="definitely_not_a_task")
+
+    def test_step_via_websocket_client(self):
+        """End-to-end /reset → /step → /state via the typed WebSocket EnvClient.
+        This is the canonical test path for the OpenEnv contract."""
+        import asyncio
+        import threading
+        import time as _time
+
+        import uvicorn
+
+        from client import TriageOpsEnv
+        from models import TriageAction, ActionType
+
+        importlib.reload(server.app)
+        from server.app import app
+
+        class _Server(uvicorn.Server):
+            def install_signal_handlers(self): pass
+
+        config = uvicorn.Config(app, host="127.0.0.1", port=8801, log_level="error")
+        srv = _Server(config)
+        thread = threading.Thread(target=srv.run, daemon=True)
+        thread.start()
+        _time.sleep(1.0)
+
+        async def go():
+            async with TriageOpsEnv(base_url="http://127.0.0.1:8801") as env:
+                result = await env.reset()
+                assert len(result.observation.tickets) > 0
+                tid = result.observation.tickets[0].id
+                step_result = await env.step(TriageAction(
+                    action_type=ActionType.RESPOND,
+                    ticket_id=tid,
+                    response_text="I sincerely apologize. I have resolved this immediately.",
+                ))
+                assert step_result.reward is not None
+                state = await env.state()
+                assert state.step_count >= 1
+
+        asyncio.run(go())
+        srv.should_exit = True
 
     def test_step_malformed(self):
         c = self._client()
         c.post("/reset", json={})
-        assert c.post("/step", json={}).status_code == 422
-        assert c.post("/step", json={"action_type": "respond"}).status_code == 422
+        # OpenEnv create_app wraps action under "action" key — bare body fails validation
+        r = c.post("/step", json={})
+        assert r.status_code == 422
 
-    def test_grade_returns_all_components(self):
+    def test_state_endpoint(self):
         c = self._client()
         c.post("/reset", json={})
-        g = c.get("/grade").json()
-        assert 0.0 <= g["score"] <= 1.0
-        assert len(g["breakdown"]) == 7
+        r = c.get("/state")
+        assert r.status_code == 200
+        assert "step_count" in r.json()

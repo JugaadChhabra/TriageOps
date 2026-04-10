@@ -1,9 +1,9 @@
 {
   "name": "full_resolution",
-  "description": "Hard — 20 initial tickets + Poisson arrivals (rate 3.0) + 2 burst events = 30+ total. VIP tickets (15%) carry 3x weight. Engineering dept goes down at step 4. Must classify, prioritize, respond, detect duplicates, and handle escalations under extreme time pressure.",
+  "description": "Hard — 20 initial tickets + Poisson arrivals (rate 3.0) + 2 burst events + 1 compliance landmine = 50+ total. VIP tickets (15%) carry 3x weight. Engineering dept goes offline at step 4. Capacity 4/step × 10 = 40 actions for 50+ tickets — strategic deferrals required.",
   "initial_tickets": 20,
   "max_steps": 10,
-  "capacity_per_step": 5,
+  "capacity_per_step": 4,
   "arrival_rate": 3.0,
   "breach_threshold": 15,
   "sla_steps": {"p0": 2, "p1": 3, "p2": 5, "p3": 8},
@@ -14,8 +14,9 @@
   ],
   "enable_duplicates": true,
   "vip_ratio": 0.15,
+  "landmine_count": 1,
   "department_outage": {"engineering": 4},
-  "department_capacity": 6,
+  "department_capacity": 5,
   "grader_weights": {
     "resolution_rate": 0.15,
     "prioritization": 0.15,
